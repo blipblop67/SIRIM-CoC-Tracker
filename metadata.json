@@ -1,0 +1,7 @@
+{
+  "name": "SIRIM CoC Progress Tracker",
+  "description": "Tracks SIRIM Certificate of Conformity applications from email threads, synchronizes records with Google Sheets, and triggers alerts for pending action items.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
+
