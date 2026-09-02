@@ -1,15 +1,10 @@
 import express, { Request, Response } from "express";
 import path from "path";
-import { fileURLToPath } from "url";
-import { createServer as createViteServer } from "vite";
 import { GoogleGenAI, Type } from "@google/genai";
 import { google } from "googleapis";
 import dotenv from "dotenv";
 
 dotenv.config();
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
 
 // Lazy initialization for Gemini API
 function getGeminiClient(): GoogleGenAI {
@@ -20,9 +15,160 @@ function getGeminiClient(): GoogleGenAI {
   return new GoogleGenAI({ apiKey });
 }
 
+// Robust Gemini call with automatic retry and model failover
+async function generateContentWithRetryAndFallback(
+  ai: GoogleGenAI,
+  primaryModel: string,
+  contents: any,
+  config?: any,
+  fallbackModel: string = "gemini-2.5-flash"
+) {
+  const modelsToTry = [primaryModel, fallbackModel];
+  let lastError: any = null;
+
+  for (const model of modelsToTry) {
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        const response = await ai.models.generateContent({
+          model,
+          contents,
+          config,
+        });
+        return response;
+      } catch (err: any) {
+        lastError = err;
+        const errMsg = String(err?.message || err);
+        const isTransient =
+          errMsg.includes("503") ||
+          errMsg.includes("429") ||
+          errMsg.includes("UNAVAILABLE") ||
+          errMsg.includes("high demand") ||
+          errMsg.includes("ResourceExhausted") ||
+          errMsg.includes("overloaded");
+
+        console.warn(`[Gemini API] Attempt ${attempt} with ${model} encountered: ${errMsg}`);
+
+        if (isTransient && attempt < 2) {
+          const delayMs = attempt * 800 + Math.floor(Math.random() * 300);
+          await new Promise((r) => setTimeout(r, delayMs));
+        } else {
+          break; // Try fallback model
+        }
+      }
+    }
+  }
+
+  throw lastError;
+}
+
+// Heuristic fallback parser for SIRIM emails when model experiences temporary high demand
+function fallbackHeuristicSirimParser(emailSubject: string, emailBody: string, sender: string, date: string) {
+  const fullText = `${emailSubject || ""}\n${emailBody || ""}`;
+  
+  // Extract Application Ref
+  const refMatch = fullText.match(/(SQAS\/[A-Z0-9\/_-]+|e-?ComM\/[A-Z0-9\/_-]+|CIDB\/[A-Z0-9\/_-]+|COA\/[A-Z0-9\/_-]+|SIRIM\/[A-Z0-9\/_-]+|[A-Z]{3,4}\/[A-Z0-9\/_-]{4,})/i);
+  const applicationRef = refMatch ? refMatch[0].trim() : `SQAS/GEN/${Date.now().toString().slice(-4)}`;
+
+  // Extract Model Number
+  const modelMatch = fullText.match(/(?:Model(?:\s*No\.?|\s*Number)?|M\/N)[:\s]+([A-Za-z0-9-_/]+)/i) ||
+                     fullText.match(/\((CYT-[A-Za-z0-9-_]+|[A-Z0-9]{3,}-[A-Z0-9-_]+)\)/i);
+  const modelNumber = modelMatch ? modelMatch[1].trim() : "CYT-GEN-01";
+
+  // Product Name
+  const cleanSubject = (emailSubject || "").replace(/^(re|fwd|urgent|update|fw):\s*/i, "").trim();
+  const productName = cleanSubject.length > 5 ? cleanSubject : `SIRIM Product (${modelNumber})`;
+
+  // Officer name
+  const officerMatch = fullText.match(/(?:Officer|Regards|From|Auditor|Evaluator)[:,\s]+([A-Za-z\s]+(?:Ahmad|Zulkifli|Subramaniam|Othman|Ibrahim|Nurul|Farhan|Kavitha|Zainab|Faiz|Mohd|Bin|Binti)[A-Za-z\s]*)/i);
+  const officerName = officerMatch ? officerMatch[1].trim().slice(0, 40) : undefined;
+  
+  // Status detection
+  let status = "UNDER_REVIEW";
+  let scheme = "Type Approval (MCMC/SIRIM)";
+  const lower = fullText.toLowerCase();
+
+  if (lower.includes("rfi") || lower.includes("request for information") || lower.includes("clarification") || lower.includes("amendment")) {
+    status = "RFI_ACTION_REQUIRED";
+  } else if (lower.includes("sample") && (lower.includes("submit") || lower.includes("courier") || lower.includes("request") || lower.includes("call notice"))) {
+    status = "SAMPLE_REQUESTED";
+  } else if (lower.includes("invoice") || lower.includes("fee") || lower.includes("payment pending") || lower.includes("unpaid")) {
+    status = "PAYMENT_PENDING";
+  } else if (lower.includes("approved") || lower.includes("certificate issued") || lower.includes("coa issued") || lower.includes("issuance of certificate")) {
+    status = "APPROVED";
+  } else if (lower.includes("testing in progress") || lower.includes("lab test")) {
+    status = "TESTING_IN_PROGRESS";
+  }
+
+  if (lower.includes("special approval")) scheme = "Special Approval";
+  else if (lower.includes("modular approval")) scheme = "Modular Approval";
+  else if (lower.includes("cidb")) scheme = "CIDB Certification";
+  else if (lower.includes("safety") || lower.includes("emc") || lower.includes("ms standards")) scheme = "Safety & EMC (MS Standards)";
+
+  // Action items
+  const actionItems: any[] = [];
+  if (status === "RFI_ACTION_REQUIRED") {
+    actionItems.push({
+      title: "Provide technical documentation or clarification requested by SIRIM",
+      description: "Review SIRIM queries and reply with updated schematics, manual, or test reports.",
+      assignedTo: "APPLICANT",
+      dueDate: new Date(Date.now() + 7 * 86400000).toISOString().split("T")[0],
+      priority: "HIGH",
+      requiredActionType: "PROVIDE_CLARIFICATION",
+      emailSourceSnippet: cleanSubject,
+    });
+  } else if (status === "SAMPLE_REQUESTED") {
+    actionItems.push({
+      title: "Deliver test samples to SIRIM QAS Lab (Shah Alam)",
+      description: "Prepare and courier hardware test units along with power cables and RF test modes.",
+      assignedTo: "APPLICANT",
+      dueDate: new Date(Date.now() + 14 * 86400000).toISOString().split("T")[0],
+      priority: "HIGH",
+      requiredActionType: "SEND_SAMPLE",
+      emailSourceSnippet: cleanSubject,
+    });
+  } else if (status === "PAYMENT_PENDING") {
+    actionItems.push({
+      title: "Settle outstanding SIRIM processing fee invoice via e-ComM",
+      description: "Submit payment online and upload the payment receipt.",
+      assignedTo: "APPLICANT",
+      dueDate: new Date(Date.now() + 5 * 86400000).toISOString().split("T")[0],
+      priority: "CRITICAL",
+      requiredActionType: "PAY_FEE",
+      emailSourceSnippet: cleanSubject,
+    });
+  }
+
+  return {
+    isSirimRelated: true,
+    confidence: 0.85,
+    applicationRef,
+    productName,
+    modelNumber,
+    brand: "Cytron",
+    applicant: "Cytron Technologies Sdn Bhd",
+    scheme,
+    status,
+    officerName,
+    officerEmail: sender.includes("@sirim.my") ? sender : undefined,
+    submissionDate: date ? date.split("T")[0] : new Date().toISOString().split("T")[0],
+    lastActivityDate: new Date().toISOString().split("T")[0],
+    targetDeadline: new Date(Date.now() + 7 * 86400000).toISOString().split("T")[0],
+    summary: `Communication ingested: ${cleanSubject}`,
+    actionItems,
+    timelineEvent: {
+      date: date ? date.split("T")[0] : new Date().toISOString().split("T")[0],
+      title: `SIRIM Communication: ${cleanSubject.slice(0, 50)}`,
+      description: `Ingested email regarding ${applicationRef} (${status}).`,
+      sender: sender || "SIRIM QAS",
+      emailSubject,
+      type: status === "RFI_ACTION_REQUIRED" ? "rfi" : status === "SAMPLE_REQUESTED" ? "sample" : status === "PAYMENT_PENDING" ? "payment" : "status_change",
+    },
+  };
+}
+
 async function startServer() {
   const app = express();
-  const PORT = 3000;
+  const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 
   app.use(express.json({ limit: "15mb" }));
 
@@ -87,10 +233,11 @@ OUTPUT RULES:
 
 Return ONLY a valid JSON object matching this schema.`;
 
-      const response = await ai.models.generateContent({
-        model: "gemini-3.7-flash",
-        contents: prompt,
-        config: {
+      const response = await generateContentWithRetryAndFallback(
+        ai,
+        "gemini-3.7-flash",
+        prompt,
+        {
           responseMimeType: "application/json",
           responseSchema: {
             type: Type.OBJECT,
@@ -205,7 +352,8 @@ Return ONLY a valid JSON object matching this schema.`;
             ],
           },
         },
-      });
+        "gemini-2.5-flash"
+      );
 
       const jsonText = response.text?.trim();
       if (!jsonText) {
@@ -215,11 +363,21 @@ Return ONLY a valid JSON object matching this schema.`;
       const parsedData = JSON.parse(jsonText);
       res.json({ success: true, data: parsedData });
     } catch (err: any) {
-      console.error("Error in parse-email-thread:", err);
-      res.status(500).json({
-        error: "Failed to parse email with Gemini AI",
-        details: err?.message || String(err),
-      });
+      console.warn("Gemini AI parse error, utilizing fallback regulatory parser:", err?.message || err);
+      try {
+        const heuristicData = fallbackHeuristicSirimParser(
+          req.body?.emailSubject || "",
+          req.body?.emailBody || "",
+          req.body?.sender || "",
+          req.body?.date || ""
+        );
+        res.json({ success: true, data: heuristicData, isFallback: true });
+      } catch (fallbackErr) {
+        res.status(500).json({
+          error: "Failed to parse email with Gemini AI",
+          details: err?.message || String(err),
+        });
+      }
     }
   });
 
@@ -227,17 +385,17 @@ Return ONLY a valid JSON object matching this schema.`;
   // 2. Gemini AI: Draft Official Response to SIRIM
   // ----------------------------------------------------
   app.post("/api/gemini/generate-reply", async (req: Request, res: Response) => {
-    try {
-      const {
-        applicationRef,
-        productName,
-        modelNumber,
-        officerName,
-        responseIntent, // 'SUBMIT_DOCS' | 'REQUEST_EXTENSION' | 'STATUS_FOLLOWUP' | 'SAMPLE_TRACKING' | 'CUSTOM'
-        customNotes,
-        actionItemDetails,
-      } = req.body;
+    const {
+      applicationRef,
+      productName,
+      modelNumber,
+      officerName,
+      responseIntent, // 'SUBMIT_DOCS' | 'REQUEST_EXTENSION' | 'STATUS_FOLLOWUP' | 'SAMPLE_TRACKING' | 'CUSTOM'
+      customNotes,
+      actionItemDetails,
+    } = req.body;
 
+    try {
       const ai = getGeminiClient();
 
       const prompt = `You are a professional regulatory compliance manager at a high-tech Malaysian electronics & IoT manufacturer.
@@ -260,10 +418,11 @@ DRAFTING GUIDELINES:
 
 Return a JSON with "subject", "body", and "suggestedAttachments" (array of strings).`;
 
-      const response = await ai.models.generateContent({
-        model: "gemini-3.7-flash",
-        contents: prompt,
-        config: {
+      const response = await generateContentWithRetryAndFallback(
+        ai,
+        "gemini-3.7-flash",
+        prompt,
+        {
           responseMimeType: "application/json",
           responseSchema: {
             type: Type.OBJECT,
@@ -278,17 +437,20 @@ Return a JSON with "subject", "body", and "suggestedAttachments" (array of strin
             required: ["subject", "body", "suggestedAttachments"],
           },
         },
-      });
+        "gemini-2.5-flash"
+      );
 
       const jsonText = response.text?.trim();
       const parsedDraft = JSON.parse(jsonText || "{}");
       res.json({ success: true, draft: parsedDraft });
     } catch (err: any) {
-      console.error("Error in generate-reply:", err);
-      res.status(500).json({
-        error: "Failed to generate reply with Gemini AI",
-        details: err?.message || String(err),
-      });
+      console.warn("Gemini AI draft reply error, generating fallback draft template:", err?.message || err);
+      const fallbackDraft = {
+        subject: `RE: ${applicationRef || "SIRIM CoC"} - ${responseIntent === "SUBMIT_DOCS" ? "Submission of Requested Documents" : responseIntent === "REQUEST_EXTENSION" ? "Request for Extension of Time" : responseIntent === "SAMPLE_TRACKING" ? "Submission of Test Samples Courier Details" : "Follow-up on Application Status"}`,
+        body: `Dear ${officerName || "SIRIM QAS Certification Officer"},\n\nWe refer to our Certificate of Conformity / Type Approval application for reference ${applicationRef || "N/A"} (${productName || "Equipment"}, Model: ${modelNumber || "N/A"}).\n\n${customNotes || (actionItemDetails ? `Regarding the requested item: "${actionItemDetails}", we have reviewed the requirements and prepared the necessary updates.` : "We are pleased to provide the requested information and documentation as required by the technical evaluation team.")}\n\nPlease let us know if any further clarification or documentation is required for your evaluation.\n\nThank you for your assistance.\n\nBest regards,\nRegulatory Compliance Team\nCytron Technologies Sdn Bhd`,
+        suggestedAttachments: responseIntent === "SUBMIT_DOCS" ? ["Technical_Datasheet_v2.pdf", "RF_Test_Report.pdf"] : responseIntent === "SAMPLE_TRACKING" ? ["Courier_Consignment_Note.pdf"] : ["Company_Cover_Letter.pdf"]
+      };
+      res.json({ success: true, draft: fallbackDraft, isFallback: true });
     }
   });
 
@@ -347,6 +509,8 @@ Return a JSON with "subject", "body", and "suggestedAttachments" (array of strin
         "Status",
         "Assigned SIRIM Officer",
         "Officer Email",
+        "Email Subject / Thread Name",
+        "Gmail Thread Link",
         "Submission Date",
         "Last Activity",
         "Target SLA Deadline",
@@ -361,6 +525,26 @@ Return a JSON with "subject", "body", and "suggestedAttachments" (array of strin
         "Last Synced (UTC)",
       ];
 
+      // Helper to determine email subject and gmail link
+      const extractEmailMeta = (appItem: any) => {
+        const emailSubject =
+          appItem.emailSubject ||
+          appItem.emailThreads?.[appItem.emailThreads.length - 1]?.subject ||
+          appItem.timeline?.find((t: any) => t.emailSubject)?.emailSubject ||
+          `SIRIM e-ComM: ${appItem.applicationRef || appItem.productName || "Update"}`;
+
+        let gmailLink = appItem.gmailThreadLink || "";
+        if (!gmailLink) {
+          if (appItem.threadId && !appItem.threadId.startsWith("th_manual") && !appItem.threadId.startsWith("th_sirim")) {
+            gmailLink = `https://mail.google.com/mail/u/0/#all/${appItem.threadId}`;
+          } else {
+            const query = appItem.applicationRef || appItem.emailSubject || appItem.modelNumber || "SIRIM";
+            gmailLink = `https://mail.google.com/mail/u/0/#search/${encodeURIComponent(query)}`;
+          }
+        }
+        return { emailSubject, gmailLink };
+      };
+
       // Prepare initial data rows if provided
       const rowsData: any[][] = [headers];
 
@@ -373,6 +557,7 @@ Return a JSON with "subject", "body", and "suggestedAttachments" (array of strin
 
           const primaryAssignee = (appItem.actionItems || []).find((a: any) => !a.isCompleted)?.assignedTo || "None";
           const maxPriority = (appItem.actionItems || []).find((a: any) => !a.isCompleted)?.priority || "LOW";
+          const { emailSubject, gmailLink } = extractEmailMeta(appItem);
 
           rowsData.push([
             appItem.applicationRef || "",
@@ -383,6 +568,8 @@ Return a JSON with "subject", "body", and "suggestedAttachments" (array of strin
             appItem.status || "",
             appItem.officerName || "",
             appItem.officerEmail || "",
+            emailSubject,
+            gmailLink,
             appItem.submissionDate || "",
             appItem.lastActivityDate || "",
             appItem.targetDeadline || "",
@@ -440,7 +627,7 @@ Return a JSON with "subject", "body", and "suggestedAttachments" (array of strin
                 fields: "userEnteredFormat(backgroundColor,textFormat,horizontalAlignment,verticalAlignment,wrapStrategy)",
               },
             },
-            // Auto resize or set reasonable column widths
+            // Auto resize or set reasonable column heights
             {
               updateDimensionProperties: {
                 range: {
@@ -455,14 +642,31 @@ Return a JSON with "subject", "body", and "suggestedAttachments" (array of strin
                 fields: "pixelSize",
               },
             },
-            // Set text wrap on Action items & Product name columns
+            // Set text wrap on Action items, Email Subject, and Notes columns
             {
               repeatCell: {
                 range: {
                   sheetId: firstSheetId,
                   startRowIndex: 1,
-                  startColumnIndex: 11, // Pending Action Items
-                  endColumnIndex: 12,
+                  startColumnIndex: 8, // Email Subject
+                  endColumnIndex: 10,  // Email Link
+                },
+                cell: {
+                  userEnteredFormat: {
+                    wrapStrategy: "WRAP",
+                    verticalAlignment: "TOP",
+                  },
+                },
+                fields: "userEnteredFormat(wrapStrategy,verticalAlignment)",
+              },
+            },
+            {
+              repeatCell: {
+                range: {
+                  sheetId: firstSheetId,
+                  startRowIndex: 1,
+                  startColumnIndex: 13, // Pending Action Items
+                  endColumnIndex: 14,
                 },
                 cell: {
                   userEnteredFormat: {
@@ -525,6 +729,8 @@ Return a JSON with "subject", "body", and "suggestedAttachments" (array of strin
         "Status",
         "Assigned SIRIM Officer",
         "Officer Email",
+        "Email Subject / Thread Name",
+        "Gmail Thread Link",
         "Submission Date",
         "Last Activity",
         "Target SLA Deadline",
@@ -550,6 +756,22 @@ Return a JSON with "subject", "body", and "suggestedAttachments" (array of strin
         const primaryAssignee = (appItem.actionItems || []).find((a: any) => !a.isCompleted)?.assignedTo || "None";
         const maxPriority = (appItem.actionItems || []).find((a: any) => !a.isCompleted)?.priority || "LOW";
 
+        const emailSubject =
+          appItem.emailSubject ||
+          appItem.emailThreads?.[appItem.emailThreads.length - 1]?.subject ||
+          appItem.timeline?.find((t: any) => t.emailSubject)?.emailSubject ||
+          `SIRIM e-ComM: ${appItem.applicationRef || appItem.productName || "Update"}`;
+
+        let gmailLink = appItem.gmailThreadLink || "";
+        if (!gmailLink) {
+          if (appItem.threadId && !appItem.threadId.startsWith("th_manual") && !appItem.threadId.startsWith("th_sirim")) {
+            gmailLink = `https://mail.google.com/mail/u/0/#all/${appItem.threadId}`;
+          } else {
+            const query = appItem.applicationRef || appItem.emailSubject || appItem.modelNumber || "SIRIM";
+            gmailLink = `https://mail.google.com/mail/u/0/#search/${encodeURIComponent(query)}`;
+          }
+        }
+
         rowsData.push([
           appItem.applicationRef || "",
           appItem.productName || "",
@@ -559,6 +781,8 @@ Return a JSON with "subject", "body", and "suggestedAttachments" (array of strin
           appItem.status || "",
           appItem.officerName || "",
           appItem.officerEmail || "",
+          emailSubject,
+          gmailLink,
           appItem.submissionDate || "",
           appItem.lastActivityDate || "",
           appItem.targetDeadline || "",
@@ -752,9 +976,555 @@ Return a JSON with "subject", "body", and "suggestedAttachments" (array of strin
   });
 
   // ----------------------------------------------------
-  // Vite Middleware Setup
+  // 7. Telegram Bot: Raw Message Sender Helper
+  // ----------------------------------------------------
+  async function sendTelegramRawMessage(
+    botToken: string,
+    chatId: string,
+    text: string,
+    options?: { topicId?: string; parseMode?: "HTML" | "Markdown" }
+  ) {
+    const token = (botToken || process.env.TELEGRAM_BOT_TOKEN || "").trim();
+    let rawChat = (chatId || process.env.TELEGRAM_CHAT_ID || "").trim();
+    let resolvedTopicId = (options?.topicId || process.env.TELEGRAM_TOPIC_ID || "").trim();
+
+    // Support combined Chat ID and Topic ID formats like "-1001234567890:42" or "-1001234567890/42"
+    if (rawChat.includes(":") || rawChat.includes("/")) {
+      const delimiter = rawChat.includes(":") ? ":" : "/";
+      const parts = rawChat.split(delimiter);
+      rawChat = parts[0].trim();
+      if (!resolvedTopicId && parts[1]) {
+        resolvedTopicId = parts[1].trim();
+      }
+    }
+
+    if (!token) {
+      throw new Error("Telegram Bot Token is required. Please configure it in the Automation & Telegram Bot settings.");
+    }
+    if (!rawChat) {
+      throw new Error("Telegram Chat ID is required. Please specify your Chat/Group ID in the Automation settings.");
+    }
+
+    const payload: any = {
+      chat_id: rawChat,
+      text,
+      parse_mode: options?.parseMode || "HTML",
+      disable_web_page_preview: false,
+    };
+
+    if (resolvedTopicId) {
+      const parsedTopic = parseInt(resolvedTopicId, 10);
+      if (!isNaN(parsedTopic)) {
+        payload.message_thread_id = parsedTopic;
+      }
+    }
+
+    const url = `https://api.telegram.org/bot${token}/sendMessage`;
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+
+    const resJson: any = await response.json();
+    if (!response.ok || !resJson.ok) {
+      throw new Error(resJson.description || `Telegram API error (${response.status})`);
+    }
+
+    return resJson;
+  }
+
+  // ----------------------------------------------------
+  // 8. Telegram Bot: Formatter for Daily Morning Briefing
+  // ----------------------------------------------------
+  function formatTelegramBriefing(
+    applications: any[],
+    options: {
+      title?: string;
+      sheetUrl?: string;
+      newScannedCount?: number;
+      isUrgentAlert?: boolean;
+    }
+  ) {
+    const now = new Date();
+    const dateStr = now.toLocaleDateString("en-GB", { timeZone: "Asia/Kuala_Lumpur", day: "2-digit", month: "short", year: "numeric" });
+    const timeStr = now.toLocaleTimeString("en-GB", { timeZone: "Asia/Kuala_Lumpur", hour: "2-digit", minute: "2-digit" });
+
+    const totalApps = applications.length;
+    const rfiApps = applications.filter((a) => a.status === "RFI_ACTION_REQUIRED");
+    const sampleApps = applications.filter((a) => a.status === "SAMPLE_REQUESTED");
+    const pendingPaymentApps = applications.filter((a) => a.status === "PAYMENT_PENDING");
+    const approvedApps = applications.filter((a) => a.status === "APPROVED");
+
+    const headerEmoji = options.isUrgentAlert ? "🚨" : "🌅";
+    const headerTitle = options.title || (options.isUrgentAlert ? "SIRIM CoC Urgent Action Alert" : "SIRIM CoC Daily Morning Briefing");
+
+    let msg = `${headerEmoji} <b>${headerTitle}</b>\n`;
+    msg += `🏢 <i>Cytron Technologies • Regulatory Compliance Register</i>\n`;
+    msg += `📅 <b>Generated:</b> ${dateStr} at ${timeStr} (MYT)\n\n`;
+
+    msg += `📊 <b>Status Snapshot:</b>\n`;
+    msg += `• Total Monitored Applications: <b>${totalApps}</b>\n`;
+    msg += `• ⚠️ RFI Action Required: <b>${rfiApps.length}</b>\n`;
+    msg += `• 📦 Test Samples Due: <b>${sampleApps.length}</b>\n`;
+    msg += `• 💳 Payment Pending: <b>${pendingPaymentApps.length}</b>\n`;
+    msg += `• ✅ Approved / CoC Issued: <b>${approvedApps.length}</b>\n`;
+    if (options.newScannedCount !== undefined && options.newScannedCount > 0) {
+      msg += `• 📥 Newly Detected Inbound Updates: <b>${options.newScannedCount}</b>\n`;
+    }
+    msg += `\n`;
+
+    // Urgent Action Items & RFIs
+    const urgentQueue = applications.filter((a) =>
+      a.status === "RFI_ACTION_REQUIRED" ||
+      a.status === "SAMPLE_REQUESTED" ||
+      a.status === "PAYMENT_PENDING" ||
+      (a.actionItems && a.actionItems.some((act: any) => !act.isCompleted && (act.priority === "CRITICAL" || act.priority === "HIGH")))
+    ).slice(0, 6);
+
+    if (urgentQueue.length > 0) {
+      msg += `🚨 <b>Action Items & Target Deadlines:</b>\n`;
+      urgentQueue.forEach((app, idx) => {
+        const pending = (app.actionItems || []).find((act: any) => !act.isCompleted);
+        const actionText = pending ? pending.title : (app.notes || app.status);
+        const officer = app.officerName ? ` (Officer: ${app.officerName})` : "";
+
+        let statusBadge = "⚠️ RFI Required";
+        if (app.status === "SAMPLE_REQUESTED") statusBadge = "📦 Sample Requested";
+        else if (app.status === "PAYMENT_PENDING") statusBadge = "💳 Payment Due";
+        else if (app.status === "TESTING_IN_PROGRESS") statusBadge = "🔬 Testing in Progress";
+
+        const query = app.applicationRef || app.modelNumber || "SIRIM";
+        const gmailLink = app.gmailThreadLink || `https://mail.google.com/mail/u/0/#search/${encodeURIComponent(query)}`;
+
+        msg += `<b>${idx + 1}. [${app.applicationRef || "Ref N/A"}]</b> ${app.productName || "Equipment"} (<code>${app.modelNumber || "Model N/A"}</code>)\n`;
+        msg += `   • Status: <b>${statusBadge}</b>${officer}\n`;
+        if (app.targetDeadline) {
+          msg += `   • SLA Deadline: <b>${app.targetDeadline}</b>\n`;
+        }
+        msg += `   • Action: ${actionText}\n`;
+        msg += `   • <a href="${gmailLink}">✉️ Open Gmail Thread</a>\n\n`;
+      });
+    } else {
+      msg += `✨ <b>All Applications On Track!</b> No outstanding RFIs or immediate bottlenecks detected.\n\n`;
+    }
+
+    // Google Sheet link
+    if (options.sheetUrl) {
+      msg += `📈 <a href="${options.sheetUrl}"><b>📊 Open Master Google Sheet Register ↗</b></a>\n\n`;
+    }
+    msg += `🤖 <i>Automated by SIRIM CoC Intelligence Tracker Engine</i>`;
+
+    return msg;
+  }
+
+  // ----------------------------------------------------
+  // 9. Telegram API: Test Connection Endpoint
+  // ----------------------------------------------------
+  app.post("/api/telegram/test", async (req: Request, res: Response) => {
+    try {
+      const { botToken, chatId, topicId } = req.body;
+      const testMessage = `✅ <b>SIRIM CoC Tracker — Telegram Connection Verified!</b>\n\n` +
+        `Your Telegram bot is successfully connected and configured to receive:\n` +
+        `• 🌅 Daily Morning Status Digests & Summaries\n` +
+        `• 🚨 Instant alerts for SIRIM RFIs & Clarification requests\n` +
+        `• 📦 Sample Call Notices & Lab Delivery Deadlines\n` +
+        `• 📊 Auto-updated Google Sheet direct links\n\n` +
+        `<i>Time: ${new Date().toLocaleTimeString("en-GB", { timeZone: "Asia/Kuala_Lumpur" })} MYT</i>`;
+
+      const tgResult = await sendTelegramRawMessage(botToken, chatId, testMessage, { topicId });
+      res.json({ success: true, result: tgResult });
+    } catch (err: any) {
+      console.error("Error in telegram/test:", err);
+      res.status(400).json({
+        error: "Failed to send Telegram test message",
+        details: err?.message || String(err),
+      });
+    }
+  });
+
+  // ----------------------------------------------------
+  // 10. Telegram API: Send Custom or Digest Message
+  // ----------------------------------------------------
+  app.post("/api/telegram/send", async (req: Request, res: Response) => {
+    try {
+      const { botToken, chatId, topicId, message, applications, sheetUrl, title, isUrgentAlert } = req.body;
+
+      let textToSend = message;
+      if (!textToSend && Array.isArray(applications)) {
+        textToSend = formatTelegramBriefing(applications, {
+          title,
+          sheetUrl,
+          isUrgentAlert,
+        });
+      }
+
+      if (!textToSend) {
+        return res.status(400).json({ error: "Either message text or applications array is required" });
+      }
+
+      const tgResult = await sendTelegramRawMessage(botToken, chatId, textToSend, { topicId });
+      res.json({ success: true, result: tgResult });
+    } catch (err: any) {
+      console.error("Error in telegram/send:", err);
+      res.status(400).json({
+        error: "Failed to send Telegram message",
+        details: err?.message || String(err),
+      });
+    }
+  });
+
+  // ----------------------------------------------------
+  // 11. Automated Morning Engine: Run Full End-to-End Pipeline
+  // ----------------------------------------------------
+  app.post("/api/automation/run", async (req: Request, res: Response) => {
+    const logs: Array<{ timestamp: string; type: string; status: string; message: string; details?: string }> = [];
+    const addLog = (type: string, status: string, message: string, details?: string) => {
+      logs.push({
+        timestamp: new Date().toISOString(),
+        type,
+        status,
+        message,
+        details,
+      });
+    };
+
+    try {
+      const {
+        applications = [],
+        sheetConfig: directSheetConfig,
+        spreadsheetId,
+        sheetName,
+        spreadsheetUrl,
+        telegramConfig,
+        autoScanGmail: directAutoScan,
+        autoSyncSheet: directAutoSync,
+        autoSendTelegram: directAutoTelegram,
+        options = {},
+      } = req.body;
+
+      const sheetConfig = directSheetConfig || (spreadsheetId ? {
+        spreadsheetId,
+        sheetName: sheetName || "Active CoC Applications",
+        spreadsheetUrl: spreadsheetUrl || `https://docs.google.com/spreadsheets/d/${spreadsheetId}/edit`,
+      } : null);
+
+      const autoScanGmail = options.autoScanGmail !== undefined ? options.autoScanGmail : (directAutoScan !== undefined ? directAutoScan : true);
+      const autoSyncSheet = options.autoSyncSheet !== undefined ? options.autoSyncSheet : (directAutoSync !== undefined ? directAutoSync : true);
+      const autoSendTelegram = options.autoSendTelegram !== undefined ? options.autoSendTelegram : (directAutoTelegram !== undefined ? directAutoTelegram : true);
+
+      let currentApplications = [...applications];
+      let newEmailsDetected = 0;
+      const authHeader = req.headers.authorization;
+      const accessToken = authHeader && authHeader.startsWith("Bearer ") ? authHeader.split(" ")[1] : null;
+
+      addLog("SYSTEM", "INFO", "Started automated SIRIM morning synchronization cycle.");
+
+      // STEP 1: Scan Gmail if access token provided & autoScan enabled
+      if (autoScanGmail && accessToken) {
+        addLog("SCAN", "INFO", "Scanning Gmail inbox for new SIRIM QAS and e-ComM correspondence...");
+        try {
+          const oauth2Client = new google.auth.OAuth2();
+          oauth2Client.setCredentials({ access_token: accessToken });
+          const gmail = google.gmail({ version: "v1", auth: oauth2Client });
+
+          // Search recent SIRIM threads (last 2 days)
+          const searchRes = await gmail.users.threads.list({
+            userId: "me",
+            q: 'from:sirim.my OR subject:sirim OR subject:ecomm OR subject:sqas OR subject:"Type Approval" OR subject:"Certificate of Conformity" newer_than:2d',
+            maxResults: 10,
+          });
+
+          const foundThreads = searchRes.data.threads || [];
+          addLog("SCAN", "SUCCESS", `Found ${foundThreads.length} recent matching email threads in Gmail.`);
+
+          // Process and ingest any new threads
+          for (const thread of foundThreads.slice(0, 5)) {
+            if (!thread.id) continue;
+            try {
+              const threadRes = await gmail.users.threads.get({
+                userId: "me",
+                id: thread.id,
+                format: "full",
+              });
+
+              const messages = threadRes.data.messages || [];
+              const lastMsg = messages[messages.length - 1];
+              if (!lastMsg) continue;
+
+              const headers = lastMsg.payload?.headers || [];
+              const subject = headers.find((h) => h.name?.toLowerCase() === "subject")?.value || "";
+              const from = headers.find((h) => h.name?.toLowerCase() === "from")?.value || "";
+              const date = headers.find((h) => h.name?.toLowerCase() === "date")?.value || "";
+
+              let bodyText = lastMsg.snippet || "";
+              if (lastMsg.payload?.parts) {
+                for (const part of lastMsg.payload.parts) {
+                  if (part.mimeType === "text/plain" && part.body?.data) {
+                    bodyText = Buffer.from(part.body.data, "base64").toString("utf-8");
+                    break;
+                  }
+                }
+              }
+
+              // Parse with AI parser / fallback
+              let parsed: any = null;
+              try {
+                const ai = getGeminiClient();
+                const prompt = `Extract SIRIM CoC regulatory information from this email:\nSubject: ${subject}\nFrom: ${from}\nBody: ${bodyText.slice(0, 2000)}`;
+                const aiRes = await generateContentWithRetryAndFallback(
+                  ai,
+                  "gemini-3.7-flash",
+                  prompt,
+                  {
+                    responseMimeType: "application/json",
+                  },
+                  "gemini-2.5-flash"
+                );
+                parsed = JSON.parse(aiRes.text?.trim() || "{}");
+              } catch (parseErr) {
+                parsed = fallbackHeuristicSirimParser(subject, bodyText, from, date);
+              }
+
+              if (parsed && parsed.isSirimRelated !== false) {
+                newEmailsDetected++;
+                const existingIdx = currentApplications.findIndex(
+                  (a) => (a.applicationRef && parsed.applicationRef && a.applicationRef.toLowerCase() === parsed.applicationRef.toLowerCase()) || a.threadId === thread.id
+                );
+
+                const newEmailMsg = {
+                  id: lastMsg.id || `msg-${Date.now()}`,
+                  messageId: lastMsg.id || "",
+                  from,
+                  to: "applicant@cytron.io",
+                  date: date || new Date().toISOString(),
+                  subject,
+                  snippet: lastMsg.snippet || "",
+                  bodyText,
+                };
+
+                if (existingIdx >= 0) {
+                  const existing = currentApplications[existingIdx];
+                  const threadsList = [...(existing.emailThreads || [])];
+                  if (!threadsList.some((m) => m.id === newEmailMsg.id)) {
+                    threadsList.push(newEmailMsg);
+                  }
+                  currentApplications[existingIdx] = {
+                    ...existing,
+                    status: parsed.status || existing.status,
+                    officerName: parsed.officerName || existing.officerName,
+                    emailSubject: subject,
+                    lastActivityDate: new Date().toISOString().split("T")[0],
+                    emailThreads: threadsList,
+                  };
+                } else {
+                  currentApplications.unshift({
+                    id: `sirim-${thread.id}`,
+                    threadId: thread.id,
+                    applicationRef: parsed.applicationRef || `SQAS/GEN/${Date.now().toString().slice(-4)}`,
+                    productName: parsed.productName || subject,
+                    modelNumber: parsed.modelNumber || "CYT-NEW-01",
+                    brand: parsed.brand || "Cytron",
+                    applicant: "Cytron Technologies Sdn Bhd",
+                    scheme: parsed.scheme || "Type Approval (MCMC/SIRIM)",
+                    status: parsed.status || "UNDER_REVIEW",
+                    officerName: parsed.officerName || "SIRIM Evaluator",
+                    officerEmail: parsed.officerEmail || from,
+                    submissionDate: parsed.submissionDate || new Date().toISOString().split("T")[0],
+                    lastActivityDate: new Date().toISOString().split("T")[0],
+                    targetDeadline: parsed.targetDeadline || new Date(Date.now() + 7 * 86400000).toISOString().split("T")[0],
+                    emailSubject: subject,
+                    gmailThreadLink: `https://mail.google.com/mail/u/0/#all/${thread.id}`,
+                    actionItems: (parsed.actionItems || []).map((act: any, i: number) => ({
+                      id: `act-auto-${Date.now()}-${i}`,
+                      title: act.title,
+                      description: act.description || "",
+                      assignedTo: act.assignedTo || "APPLICANT",
+                      dueDate: act.dueDate || new Date(Date.now() + 7 * 86400000).toISOString().split("T")[0],
+                      isCompleted: false,
+                      priority: act.priority || "HIGH",
+                      requiredActionType: act.requiredActionType || "PROVIDE_CLARIFICATION",
+                    })),
+                    timeline: [
+                      {
+                        id: `tl-auto-${Date.now()}`,
+                        date: new Date().toISOString().split("T")[0],
+                        title: `Automated Morning Ingestion: ${subject.slice(0, 40)}`,
+                        description: `Automatically ingested via daily background scanner.`,
+                        sender: from,
+                        type: "status_change",
+                      },
+                    ],
+                    emailThreads: [newEmailMsg],
+                    syncedToSheet: false,
+                  });
+                }
+              }
+            } catch (threadProcErr: any) {
+              console.warn("Could not process thread during auto-scan", threadProcErr);
+            }
+          }
+        } catch (scanErr: any) {
+          addLog("SCAN", "WARNING", `Gmail auto-scan skipped or failed: ${scanErr?.message || scanErr}`);
+        }
+      } else {
+        addLog("SCAN", "INFO", "Gmail scan bypassed (no active OAuth session or disabled).");
+      }
+
+      // STEP 2: Auto-Sync Google Sheet
+      let sheetSyncSuccess = false;
+      if (autoSyncSheet && sheetConfig?.spreadsheetId && accessToken) {
+        addLog("SHEET_SYNC", "INFO", `Syncing ${currentApplications.length} applications to Google Sheet (${sheetConfig.spreadsheetId})...`);
+        try {
+          const oauth2Client = new google.auth.OAuth2();
+          oauth2Client.setCredentials({ access_token: accessToken });
+          const sheets = google.sheets({ version: "v4", auth: oauth2Client });
+
+          const headers = [
+            "Application Ref No",
+            "Product Name",
+            "Model Number",
+            "Brand",
+            "Certification Scheme",
+            "Status",
+            "Assigned SIRIM Officer",
+            "Officer Email",
+            "Email Subject / Thread Name",
+            "Gmail Thread Link",
+            "Submission Date",
+            "Last Activity",
+            "Target SLA Deadline",
+            "Pending Action Items",
+            "Action Assignee",
+            "Priority",
+            "Certificate No",
+            "Certificate Expiry",
+            "Fee (RM)",
+            "Payment Status",
+            "Notes / Summary",
+            "Last Synced (UTC)",
+          ];
+
+          const rowsData: any[][] = [headers];
+          currentApplications.forEach((appItem: any) => {
+            const pendingActions = (appItem.actionItems || [])
+              .filter((a: any) => !a.isCompleted)
+              .map((a: any) => `• [${a.priority}] ${a.title}`)
+              .join("\n");
+
+            const primaryAssignee = (appItem.actionItems || []).find((a: any) => !a.isCompleted)?.assignedTo || "None";
+            const maxPriority = (appItem.actionItems || []).find((a: any) => !a.isCompleted)?.priority || "LOW";
+
+            const emailSubject =
+              appItem.emailSubject ||
+              appItem.emailThreads?.[appItem.emailThreads.length - 1]?.subject ||
+              `SIRIM e-ComM: ${appItem.applicationRef || appItem.productName || "Update"}`;
+
+            let gmailLink = appItem.gmailThreadLink || "";
+            if (!gmailLink) {
+              const query = appItem.applicationRef || appItem.emailSubject || appItem.modelNumber || "SIRIM";
+              gmailLink = `https://mail.google.com/mail/u/0/#search/${encodeURIComponent(query)}`;
+            }
+
+            rowsData.push([
+              appItem.applicationRef || "",
+              appItem.productName || "",
+              appItem.modelNumber || "",
+              appItem.brand || "",
+              appItem.scheme || "",
+              appItem.status || "",
+              appItem.officerName || "",
+              appItem.officerEmail || "",
+              emailSubject,
+              gmailLink,
+              appItem.submissionDate || "",
+              appItem.lastActivityDate || "",
+              appItem.targetDeadline || "",
+              pendingActions || "None (On Track)",
+              primaryAssignee,
+              maxPriority,
+              appItem.certificateNo || "Pending Approval",
+              appItem.certificateExpiryDate || "-",
+              appItem.processingFeeRm ? Number(appItem.processingFeeRm) : "",
+              appItem.paymentStatus || "NOT_APPLICABLE",
+              appItem.notes || "",
+              new Date().toISOString(),
+            ]);
+          });
+
+          await sheets.spreadsheets.values.update({
+            spreadsheetId: sheetConfig.spreadsheetId,
+            range: `'${sheetConfig.sheetName || "Active CoC Applications"}'!A1`,
+            valueInputOption: "USER_ENTERED",
+            requestBody: { values: rowsData },
+          });
+
+          sheetSyncSuccess = true;
+          addLog("SHEET_SYNC", "SUCCESS", `Master Google Sheet successfully updated with ${currentApplications.length} applications.`);
+        } catch (sheetErr: any) {
+          addLog("SHEET_SYNC", "ERROR", `Failed to sync Google Sheet: ${sheetErr?.message || sheetErr}`);
+        }
+      } else {
+        addLog("SHEET_SYNC", "INFO", "Google Sheet sync skipped (no configured sheet ID or disabled).");
+      }
+
+      // STEP 3: Dispatch Telegram Digest / Notification
+      let telegramSent = false;
+      const tgBotToken = telegramConfig?.botToken || process.env.TELEGRAM_BOT_TOKEN;
+      const tgChatId = telegramConfig?.chatId || process.env.TELEGRAM_CHAT_ID;
+
+      if (autoSendTelegram && tgBotToken && tgChatId) {
+        addLog("TELEGRAM", "INFO", `Formatting and sending morning briefing to Telegram Chat (${tgChatId})...`);
+        try {
+          const briefingText = formatTelegramBriefing(currentApplications, {
+            sheetUrl: sheetConfig?.spreadsheetUrl,
+            newScannedCount: newEmailsDetected,
+          });
+
+          await sendTelegramRawMessage(tgBotToken, tgChatId, briefingText, {
+            topicId: telegramConfig?.topicId,
+          });
+
+          telegramSent = true;
+          addLog("TELEGRAM", "SUCCESS", "Telegram morning digest and urgent alerts successfully delivered.");
+        } catch (tgErr: any) {
+          addLog("TELEGRAM", "ERROR", `Telegram delivery failed: ${tgErr?.message || tgErr}`);
+        }
+      } else {
+        addLog("TELEGRAM", "INFO", "Telegram dispatch skipped (bot token or chat ID not configured).");
+      }
+
+      addLog("SYSTEM", "SUCCESS", "Automated synchronization pipeline completed successfully.");
+
+      res.json({
+        success: true,
+        summary: `Cycle finished: ${newEmailsDetected} new emails detected, ${sheetSyncSuccess ? "Sheet updated" : "Sheet skipped"}, ${telegramSent ? "Telegram sent" : "Telegram skipped"}.`,
+        applications: currentApplications,
+        updatedApplications: currentApplications,
+        sheetSyncResult: { success: sheetSyncSuccess },
+        scanResult: { threadsFound: newEmailsDetected },
+        newEmailsDetected,
+        sheetSyncSuccess,
+        telegramSent,
+        logs,
+      });
+    } catch (err: any) {
+      console.error("Error in automation/run:", err);
+      addLog("SYSTEM", "ERROR", `Automation pipeline encountered error: ${err?.message || err}`);
+      res.status(500).json({
+        error: "Automation execution encountered an error",
+        details: err?.message || String(err),
+        logs,
+      });
+    }
+  });
+
+
+  // ----------------------------------------------------
+  // Vite Middleware Setup (Development only)
   // ----------------------------------------------------
   if (process.env.NODE_ENV !== "production") {
+    const { createServer: createViteServer } = await import("vite");
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: "spa",

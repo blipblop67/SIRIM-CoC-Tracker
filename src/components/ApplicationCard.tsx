@@ -23,7 +23,9 @@ import {
   getSchemeColor,
   calculateDeadlineInfo,
   formatDate,
+  getGmailThreadUrl,
 } from '../utils/formatters';
+import { Mail } from 'lucide-react';
 
 interface ApplicationCardProps {
   application: SirimApplication;
@@ -211,13 +213,24 @@ export const ApplicationCard: React.FC<ApplicationCardProps> = ({
 
       {/* Footer / Quick Actions */}
       <div className="px-4 py-2.5 bg-slate-50/80 border-t border-slate-100 flex items-center justify-between gap-2">
-        <div className="flex items-center gap-2 text-xs text-slate-500">
-          <span>{application.emailThreads.length} emails</span>
+        <div className="flex items-center gap-2 text-xs text-slate-500 min-w-0 truncate">
+          <a
+            href={getGmailThreadUrl(application)}
+            target="_blank"
+            rel="noreferrer"
+            onClick={(e) => e.stopPropagation()}
+            className="flex items-center gap-1 text-sky-600 hover:text-sky-800 hover:underline font-medium truncate"
+            title={application.emailSubject ? `Open email: "${application.emailSubject}"` : 'Open in Gmail'}
+          >
+            <Mail className="w-3.5 h-3.5 shrink-0" />
+            <span className="truncate">{application.emailSubject ? 'Gmail Thread' : `${application.emailThreads.length} emails`}</span>
+            <ExternalLink className="w-2.5 h-2.5 shrink-0 opacity-70" />
+          </a>
           <span>•</span>
-          <span>Last: {formatDate(application.lastActivityDate)}</span>
+          <span className="shrink-0">{formatDate(application.lastActivityDate)}</span>
         </div>
 
-        <div className="flex items-center gap-1.5" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center gap-1.5 shrink-0" onClick={(e) => e.stopPropagation()}>
           {pendingActions.length > 0 && (
             <button
               onClick={() => onQuickDraftReply(application)}

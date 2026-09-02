@@ -201,6 +201,8 @@ export const NewApplicationModal: React.FC<NewApplicationModalProps> = ({
       processingFeeRm: parsedPreview.processingFeeRm || undefined,
       paymentStatus: parsedPreview.paymentStatus || 'NOT_APPLICABLE',
       notes: parsedPreview.summary || '',
+      emailSubject: emailSubject || parsedPreview.timelineEvent?.emailSubject || `SIRIM Communication - ${parsedPreview.applicationRef || 'Update'}`,
+      gmailThreadLink: emailSubject ? `https://mail.google.com/mail/u/0/#search/${encodeURIComponent(emailSubject)}` : undefined,
       actionItems,
       timeline,
       emailThreads: [

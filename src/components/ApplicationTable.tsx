@@ -7,6 +7,8 @@ import {
   AlertTriangle,
   Copy,
   Check,
+  Mail,
+  ExternalLink,
 } from 'lucide-react';
 import { SirimApplication } from '../types';
 import {
@@ -14,6 +16,7 @@ import {
   getSchemeColor,
   calculateDeadlineInfo,
   formatDate,
+  getGmailThreadUrl,
 } from '../utils/formatters';
 
 interface ApplicationTableProps {
@@ -44,6 +47,7 @@ export const ApplicationTable: React.FC<ApplicationTableProps> = ({
             <tr className="bg-slate-900 text-white text-xs font-semibold uppercase tracking-wider">
               <th className="py-3 px-4">Ref No / Status</th>
               <th className="py-3 px-4">Product & Model</th>
+              <th className="py-3 px-4">Email Thread</th>
               <th className="py-3 px-4">Scheme</th>
               <th className="py-3 px-4">Officer</th>
               <th className="py-3 px-4">Pending Action Items</th>
@@ -58,6 +62,8 @@ export const ApplicationTable: React.FC<ApplicationTableProps> = ({
               const deadline = calculateDeadlineInfo(app.targetDeadline);
               const pendingActions = app.actionItems.filter((a) => !a.isCompleted);
               const hasCritical = pendingActions.some((a) => a.priority === 'CRITICAL');
+              const emailSubject = app.emailSubject || app.emailThreads?.[app.emailThreads.length - 1]?.subject || `Ref: ${app.applicationRef}`;
+              const gmailUrl = getGmailThreadUrl(app);
 
               return (
                 <tr
@@ -101,7 +107,28 @@ export const ApplicationTable: React.FC<ApplicationTableProps> = ({
                     </div>
                   </td>
 
-                  {/* 3. Scheme */}
+                  {/* 3. Email Thread & Link */}
+                  <td className="py-3 px-4 max-w-xs" onClick={(e) => e.stopPropagation()}>
+                    <a
+                      href={gmailUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="group/link flex items-start gap-1.5 text-sky-700 hover:text-sky-900"
+                      title="Open thread in Gmail"
+                    >
+                      <Mail className="w-3.5 h-3.5 mt-0.5 text-sky-500 shrink-0 group-hover/link:text-sky-700" />
+                      <div className="min-w-0">
+                        <p className="text-[11px] font-medium line-clamp-1 group-hover/link:underline">
+                          {emailSubject}
+                        </p>
+                        <span className="inline-flex items-center gap-0.5 text-[10px] text-sky-600 font-semibold font-mono">
+                          Open Thread <ExternalLink className="w-2.5 h-2.5" />
+                        </span>
+                      </div>
+                    </a>
+                  </td>
+
+                  {/* 4. Scheme */}
                   <td className="py-3 px-4">
                     <span
                       className={`inline-flex items-center px-2 py-0.5 rounded text-[11px] font-medium border ${getSchemeColor(
@@ -112,7 +139,7 @@ export const ApplicationTable: React.FC<ApplicationTableProps> = ({
                     </span>
                   </td>
 
-                  {/* 4. Officer */}
+                  {/* 5. Officer */}
                   <td className="py-3 px-4">
                     <div className="font-medium text-slate-800">{app.officerName || 'Not Assigned'}</div>
                     {app.officerEmail && (

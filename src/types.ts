@@ -90,6 +90,8 @@ export interface SirimApplication {
   timeline: TimelineEvent[];
   emailThreads: EmailMessage[];
   syncedToSheet: boolean;
+  emailSubject?: string;
+  gmailThreadLink?: string;
   lastSyncedAt?: string;
   sheetRowIndex?: number;
   notes?: string;
@@ -159,3 +161,39 @@ export interface ParsedEmailResult {
   actionItems: Omit<ActionItem, 'id' | 'isCompleted'>[];
   timelineEvent: Omit<TimelineEvent, 'id'>;
 }
+
+export interface TelegramConfig {
+  botToken: string;
+  chatId: string;
+  topicId?: string;
+  enabled: boolean;
+  dailyDigest: boolean;
+  instantAlertOnCritical: boolean;
+  lastSentAt?: string;
+}
+
+export interface AutomationLogEntry {
+  id: string;
+  timestamp: string;
+  type: 'SCAN' | 'PARSE' | 'SHEET_SYNC' | 'TELEGRAM' | 'SYSTEM';
+  status: 'SUCCESS' | 'WARNING' | 'ERROR' | 'INFO';
+  message: string;
+  details?: string;
+}
+
+export interface AutomationConfig {
+  enabled: boolean;
+  scheduleTime: string; // e.g. "08:30" (AM)
+  timezone: string; // e.g. "Asia/Kuala_Lumpur (MYT UTC+8)"
+  intervalHours: number; // 24 = daily morning
+  autoScanGmail: boolean;
+  autoSyncGoogleSheet: boolean;
+  autoSendTelegram: boolean;
+  alertOnCriticalOnly: boolean;
+  telegram: TelegramConfig;
+  lastRunAt?: string;
+  lastRunStatus?: 'SUCCESS' | 'WARNING' | 'ERROR' | 'IDLE';
+  lastRunSummary?: string;
+  logs: AutomationLogEntry[];
+}
+

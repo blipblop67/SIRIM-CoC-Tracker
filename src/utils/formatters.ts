@@ -202,3 +202,21 @@ export function formatDate(dateStr?: string): string {
     return dateStr;
   }
 }
+
+export function getGmailThreadUrl(app: {
+  threadId?: string;
+  gmailThreadLink?: string;
+  applicationRef?: string;
+  emailSubject?: string;
+  modelNumber?: string;
+  productName?: string;
+}): string {
+  if (app.gmailThreadLink && app.gmailThreadLink.startsWith('http')) {
+    return app.gmailThreadLink;
+  }
+  if (app.threadId && !app.threadId.startsWith('th_manual') && !app.threadId.startsWith('th_sirim')) {
+    return `https://mail.google.com/mail/u/0/#all/${app.threadId}`;
+  }
+  const searchQuery = app.applicationRef || app.emailSubject || app.modelNumber || 'SIRIM';
+  return `https://mail.google.com/mail/u/0/#search/${encodeURIComponent(searchQuery)}`;
+}

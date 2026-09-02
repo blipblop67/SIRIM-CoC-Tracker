@@ -266,7 +266,7 @@ export const GoogleSheetSyncModal: React.FC<GoogleSheetSyncModalProps> = ({
                   Auto-formatted Columns & Styling:
                 </div>
                 <p className="text-[11px] leading-relaxed">
-                  Includes Navy header formatting, frozen panes, Ref No, Model, Scheme, Status, SIRIM Officer, Target SLA Deadline, Pending Action Items, Fees, and Timestamps.
+                  Includes Navy header formatting, Ref No, Model, Scheme, Status, SIRIM Officer, <strong>Email Subject / Thread Name</strong>, <strong>Gmail Thread Link</strong> (clickable direct search/thread URL), Target SLA Deadline, Action Items, Fees, and Timestamps.
                 </p>
               </div>
 

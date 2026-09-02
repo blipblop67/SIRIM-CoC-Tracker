@@ -38,6 +38,7 @@ import {
   getSchemeColor,
   calculateDeadlineInfo,
   formatDate,
+  getGmailThreadUrl,
 } from '../utils/formatters';
 import { notificationAudio } from '../utils/audio';
 
@@ -255,12 +256,26 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({
             </div>
           </div>
 
-          <button
-            onClick={onClose}
-            className="p-1.5 text-slate-400 hover:text-white hover:bg-slate-800 rounded-lg transition-colors"
-          >
-            <X className="w-5 h-5" />
-          </button>
+          <div className="flex items-center gap-2 shrink-0">
+            <a
+              href={getGmailThreadUrl(application)}
+              target="_blank"
+              rel="noreferrer"
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-500 text-white text-xs font-semibold shadow-xs transition-colors"
+              title="Open the corresponding email thread or search in Gmail"
+            >
+              <Mail className="w-3.5 h-3.5" />
+              <span>Open in Gmail</span>
+              <ExternalLink className="w-3 h-3 opacity-80" />
+            </a>
+
+            <button
+              onClick={onClose}
+              className="p-1.5 text-slate-400 hover:text-white hover:bg-slate-800 rounded-lg transition-colors"
+            >
+              <X className="w-5 h-5" />
+            </button>
+          </div>
         </div>
 
         {/* 5-Stage Stepper Progress Banner */}
@@ -642,6 +657,31 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({
           {/* TAB 3: EMAIL THREADS EXPLORER */}
           {activeTab === 'emails' && (
             <div className="space-y-4">
+              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 p-3.5 bg-sky-50 border border-sky-100 rounded-xl">
+                <div className="space-y-0.5 min-w-0">
+                  <div className="flex items-center gap-1.5 text-xs font-bold text-sky-950">
+                    <Mail className="w-4 h-4 text-sky-600 shrink-0" />
+                    <span className="truncate">
+                      {application.emailSubject || `Thread: ${application.applicationRef}`}
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-sky-700">
+                    Thread ID: <code className="font-mono bg-sky-100/80 px-1 py-0.5 rounded text-sky-900">{application.threadId}</code>
+                  </p>
+                </div>
+
+                <a
+                  href={getGmailThreadUrl(application)}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-700 text-white text-xs font-semibold shrink-0 transition-colors shadow-xs"
+                >
+                  <Mail className="w-3.5 h-3.5" />
+                  <span>Open Thread in Gmail</span>
+                  <ExternalLink className="w-3 h-3" />
+                </a>
+              </div>
+
               <div>
                 <h4 className="text-sm font-bold text-slate-900">Email Correspondence Threads</h4>
                 <p className="text-xs text-slate-500">

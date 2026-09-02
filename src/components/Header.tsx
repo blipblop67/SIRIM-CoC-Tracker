@@ -11,64 +11,100 @@ import {
   User,
   LogOut,
   Sparkles,
+  Zap,
+  Send,
 } from 'lucide-react';
-import { SheetSyncConfig, UserAuthSession } from '../types';
+import { AutomationConfig, SheetSyncConfig, UserAuthSession } from '../types';
 
 interface HeaderProps {
   sheetConfig: SheetSyncConfig | null;
   authSession: UserAuthSession | null;
+  automationConfig: AutomationConfig;
   pendingActionsCount: number;
   criticalActionsCount: number;
   onOpenSheetModal: () => void;
   onOpenGmailScanner: () => void;
   onOpenNewAppModal: () => void;
   onOpenNotificationDrawer: () => void;
+  onOpenAutomationModal: () => void;
   onConnectGoogle: () => void;
   onDisconnectGoogle: () => void;
   onManualSyncSheet: () => void;
   isSyncingSheet: boolean;
+  isRunningAutomation: boolean;
 }
 
 export const Header: React.FC<HeaderProps> = ({
   sheetConfig,
   authSession,
+  automationConfig,
   pendingActionsCount,
   criticalActionsCount,
   onOpenSheetModal,
   onOpenGmailScanner,
   onOpenNewAppModal,
   onOpenNotificationDrawer,
+  onOpenAutomationModal,
   onConnectGoogle,
   onDisconnectGoogle,
   onManualSyncSheet,
   isSyncingSheet,
+  isRunningAutomation,
 }) => {
+  const isTelegramReady = Boolean(
+    automationConfig.telegram?.botToken?.trim() && automationConfig.telegram?.chatId?.trim()
+  );
+
   return (
-    <header className="h-16 bg-slate-900 text-white flex items-center justify-between px-8 shrink-0 shadow-lg z-10 sticky top-0">
+    <header className="h-16 bg-slate-900 text-white flex items-center justify-between px-6 sm:px-8 shrink-0 shadow-lg z-10 sticky top-0">
       {/* Logo & Brand */}
       <div className="flex items-center gap-3">
-        <div className="w-8 h-8 bg-indigo-500 rounded flex items-center justify-center">
+        <div className="w-8 h-8 bg-indigo-500 rounded flex items-center justify-center shadow-inner">
           <ShieldCheck className="w-5 h-5 text-white" />
         </div>
-        <h1 className="text-xl font-bold tracking-tight">
-          SIRIM CoC <span className="text-indigo-400">Progress Tracker</span>
-        </h1>
+        <div>
+          <h1 className="text-lg sm:text-xl font-bold tracking-tight leading-none">
+            SIRIM CoC <span className="text-indigo-400">Progress Tracker</span>
+          </h1>
+          <span className="text-[10px] text-slate-400 hidden sm:inline">
+            Automated Regulatory Intelligence Register
+          </span>
+        </div>
       </div>
 
       {/* Quick Actions & Workspace Integrations */}
-      <div className="flex items-center gap-4 sm:gap-6">
+      <div className="flex items-center gap-3 sm:gap-4">
+        {/* Automation & Telegram Bot Control Center */}
+        <button
+          onClick={onOpenAutomationModal}
+          className={`px-3 py-1.5 rounded-lg text-xs font-semibold border transition-all flex items-center gap-1.5 shadow-xs ${
+            automationConfig.enabled
+              ? 'bg-indigo-950/80 border-indigo-500/50 text-indigo-200 hover:bg-indigo-900/90'
+              : 'bg-slate-800/80 border-slate-700 text-slate-300 hover:bg-slate-700'
+          }`}
+          title="Configure Morning Automation & Telegram Bot"
+        >
+          <Zap className={`w-3.5 h-3.5 ${automationConfig.enabled ? 'text-amber-400 animate-pulse' : 'text-slate-400'}`} />
+          <span className="hidden md:inline font-medium">
+            {automationConfig.enabled ? `Auto: ${automationConfig.scheduleTime}` : 'Automation'}
+          </span>
+          {isTelegramReady && (
+            <Send className="w-3 h-3 text-sky-400 ml-0.5" />
+          )}
+        </button>
+
         {/* Sync Status / Google Sheets */}
         {sheetConfig?.spreadsheetUrl ? (
-          <div className="flex flex-col items-end hidden sm:flex">
-            <span className="text-xs text-slate-400 uppercase tracking-widest flex items-center gap-1">
-              Google Sheet <ExternalLink className="w-3 h-3" />
+          <div className="flex flex-col items-end hidden lg:flex">
+            <span className="text-[10px] text-slate-400 uppercase tracking-widest flex items-center gap-1">
+              Google Sheet <ExternalLink className="w-2.5 h-2.5" />
             </span>
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-1.5">
               <a
                 href={sheetConfig.spreadsheetUrl}
                 target="_blank"
                 rel="noreferrer"
-                className="text-sm font-medium hover:text-emerald-400 transition-colors"
+                className="text-xs font-medium hover:text-emerald-400 transition-colors truncate max-w-[140px]"
                 title="Open Master Google Sheet"
               >
                 {sheetConfig.sheetName || 'Active CoC Applications'}
@@ -76,56 +112,56 @@ export const Header: React.FC<HeaderProps> = ({
               <button
                 onClick={onManualSyncSheet}
                 disabled={isSyncingSheet}
-                className="text-slate-400 hover:text-white transition-colors"
-                title="Sync All Applications"
+                className="text-slate-400 hover:text-white transition-colors p-0.5"
+                title="Sync All Applications to Google Sheet"
               >
-                <RefreshCw className={`w-3.5 h-3.5 ${isSyncingSheet ? 'animate-spin text-emerald-400' : ''}`} />
+                <RefreshCw className={`w-3 h-3 ${isSyncingSheet ? 'animate-spin text-emerald-400' : ''}`} />
               </button>
             </div>
           </div>
         ) : (
           <button
             onClick={onOpenSheetModal}
-            className="hidden sm:flex text-sm font-medium text-emerald-300 hover:text-emerald-200 transition-colors items-center gap-1.5"
+            className="hidden sm:flex text-xs font-medium text-emerald-300 hover:text-emerald-200 transition-colors items-center gap-1.5 bg-emerald-950/60 border border-emerald-800/60 px-2.5 py-1.5 rounded-lg"
           >
-            <FileSpreadsheet className="w-4 h-4" />
+            <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-400" />
             Connect Sheet
           </button>
         )}
 
-        <div className="h-8 w-px bg-slate-700 hidden sm:block"></div>
+        <div className="h-6 w-px bg-slate-700 hidden sm:block"></div>
 
         {/* Scan & Ingest */}
         <div className="flex items-center gap-2">
           <button
             onClick={onOpenGmailScanner}
-            className="bg-slate-800 hover:bg-slate-700 px-3 py-1.5 rounded-md text-sm font-medium border border-slate-700 transition-colors flex items-center gap-1.5"
+            className="bg-slate-800 hover:bg-slate-700 px-3 py-1.5 rounded-lg text-xs font-medium border border-slate-700 transition-colors flex items-center gap-1.5"
             title="Scan Gmail Inbox"
           >
-            <Mail className="w-4 h-4" />
+            <Mail className="w-3.5 h-3.5 text-sky-400" />
             <span className="hidden sm:inline">Scan Gmail</span>
           </button>
           <button
             onClick={onOpenNewAppModal}
-            className="bg-indigo-600 hover:bg-indigo-500 text-white px-3 py-1.5 rounded-md text-sm font-medium border border-indigo-500 transition-colors flex items-center gap-1.5 shadow-sm"
+            className="bg-indigo-600 hover:bg-indigo-500 text-white px-3 py-1.5 rounded-lg text-xs font-medium border border-indigo-500 transition-colors flex items-center gap-1.5 shadow-xs"
           >
-            <Sparkles className="w-4 h-4 text-indigo-200" />
+            <Sparkles className="w-3.5 h-3.5 text-indigo-200" />
             <span className="hidden sm:inline">Ingest Email</span>
           </button>
         </div>
 
-        <div className="h-8 w-px bg-slate-700 hidden sm:block"></div>
+        <div className="h-6 w-px bg-slate-700 hidden sm:block"></div>
 
         {/* Notifications Bell */}
         <button
           onClick={onOpenNotificationDrawer}
-          className="relative text-slate-300 hover:text-white transition-colors"
+          className="relative text-slate-300 hover:text-white transition-colors p-1 rounded-lg hover:bg-slate-800"
           title="Pending Action Items & Alerts"
         >
-          <Bell className="w-5 h-5" />
+          <Bell className="w-4 h-4" />
           {pendingActionsCount > 0 && (
             <span
-              className={`absolute -top-1 -right-1 flex items-center justify-center min-w-[16px] h-[16px] px-1 text-[9px] font-bold rounded-full text-white ring-2 ring-slate-900 ${
+              className={`absolute -top-0.5 -right-0.5 flex items-center justify-center min-w-[15px] h-[15px] px-0.5 text-[8px] font-bold rounded-full text-white ring-2 ring-slate-900 ${
                 criticalActionsCount > 0 ? 'bg-rose-500 animate-pulse' : 'bg-amber-500'
               }`}
             >
@@ -136,8 +172,19 @@ export const Header: React.FC<HeaderProps> = ({
 
         {/* Google OAuth Session */}
         {authSession?.isAuthenticated ? (
-          <div className="flex items-center gap-2" title={`Signed in as ${authSession.email || 'Google User'}`}>
-            <div className="w-8 h-8 rounded-full bg-indigo-100 flex items-center justify-center text-indigo-700 font-bold text-xs border border-indigo-200 overflow-hidden cursor-pointer" onClick={onDisconnectGoogle}>
+          <div className="flex items-center gap-2 bg-slate-800/80 border border-slate-700 pl-2.5 pr-1.5 py-1 rounded-xl shadow-xs">
+            <div className="flex flex-col text-right hidden sm:block">
+              <span className="text-[11px] font-bold text-slate-200 leading-tight truncate max-w-[120px]">
+                {authSession.name || authSession.email?.split('@')[0] || 'User'}
+              </span>
+              <span className="text-[9px] text-indigo-400 font-mono leading-none truncate max-w-[120px]">
+                {authSession.email || 'Connected'}
+              </span>
+            </div>
+            <div
+              className="w-7 h-7 rounded-full bg-indigo-500/20 flex items-center justify-center text-indigo-300 font-bold text-xs border border-indigo-400/40 overflow-hidden shadow-xs shrink-0"
+              title={`Signed in as ${authSession.email}. Click to sign out.`}
+            >
               {authSession.picture ? (
                 <img
                   src={authSession.picture}
@@ -149,17 +196,26 @@ export const Header: React.FC<HeaderProps> = ({
                 (authSession.email?.charAt(0) || 'U').toUpperCase()
               )}
             </div>
+            <button
+              onClick={onDisconnectGoogle}
+              className="p-1 text-slate-400 hover:text-rose-400 rounded-md hover:bg-slate-700 transition-colors"
+              title="Sign out / Switch Google account"
+            >
+              <LogOut className="w-3.5 h-3.5" />
+            </button>
           </div>
         ) : (
           <button
             onClick={onConnectGoogle}
-            className="bg-slate-800 hover:bg-slate-700 p-2 rounded-md border border-slate-700 transition-colors"
-            title="Connect your Google Account"
+            className="bg-indigo-600 hover:bg-indigo-500 text-white px-3 py-1.5 rounded-xl text-xs font-semibold border border-indigo-500 transition-all flex items-center gap-1.5 shadow-xs"
+            title="Sign in with Google to scan your Gmail inbox & sync Google Sheets"
           >
-            <User className="w-4 h-4 text-slate-300" />
+            <User className="w-3.5 h-3.5" />
+            <span>Sign in with Google</span>
           </button>
         )}
       </div>
     </header>
   );
 };
+

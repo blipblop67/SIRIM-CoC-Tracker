@@ -21,6 +21,8 @@ import {
   SirimApplication,
   SheetSyncConfig,
   UserAuthSession,
+  AutomationConfig,
+  AutomationLogEntry,
 } from './types';
 import { INITIAL_SIRIM_APPLICATIONS } from './data/sampleApplications';
 import { Header } from './components/Header';
@@ -33,6 +35,7 @@ import { GoogleSheetSyncModal } from './components/GoogleSheetSyncModal';
 import { GmailScannerModal } from './components/GmailScannerModal';
 import { NewApplicationModal } from './components/NewApplicationModal';
 import { NotificationDrawer } from './components/NotificationDrawer';
+import { AutomationModal } from './components/AutomationModal';
 import {
   getStoredAuthSession,
   googleSignIn,
@@ -43,6 +46,78 @@ import { notificationAudio } from './utils/audio';
 
 const APPS_STORAGE_KEY = 'sirim_coc_applications_v1';
 const SHEET_CONFIG_KEY = 'sirim_coc_sheet_config_v1';
+const AUTOMATION_CONFIG_KEY = 'sirim_coc_automation_config_v1';
+
+const DEFAULT_AUTOMATION_CONFIG: AutomationConfig = {
+  enabled: true,
+  scheduleTime: '08:30',
+  timezone: 'Asia/Kuala_Lumpur',
+  intervalHours: 24,
+  autoScanGmail: true,
+  autoSyncGoogleSheet: true,
+  autoSendTelegram: true,
+  alertOnCriticalOnly: false,
+  telegram: {
+    botToken: '',
+    chatId: '',
+    topicId: '',
+    enabled: true,
+    dailyDigest: true,
+    instantAlertOnCritical: true,
+  },
+  logs: [
+    {
+      id: 'log-init-1',
+      timestamp: new Date().toISOString(),
+      type: 'SYSTEM',
+      status: 'INFO',
+      message: 'Automated morning scan & Telegram bot scheduler initialized.',
+    },
+  ],
+};
+
+// Deduplicate applications and ensure unique keys
+function sanitizeApplications(apps: SirimApplication[]): SirimApplication[] {
+  const result: SirimApplication[] = [];
+
+  for (const app of apps) {
+    if (!app) continue;
+    const cleanId = app.id || `sirim-app-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    const cleanRef = (app.applicationRef || '').trim().toLowerCase();
+
+    // Check if duplicate by ID or exact reference
+    const isGenericRef = !cleanRef || cleanRef.includes('sqas/gen');
+    const existingIndex = result.findIndex(
+      (existing) => existing.id === cleanId || (!isGenericRef && existing.applicationRef.trim().toLowerCase() === cleanRef)
+    );
+
+    if (existingIndex >= 0) {
+      // Merge with existing record
+      const existing = result[existingIndex];
+      const mergedEmails = [...(existing.emailThreads || [])];
+      for (const msg of app.emailThreads || []) {
+        if (!mergedEmails.some((m) => m.id === msg.id)) {
+          mergedEmails.push(msg);
+        }
+      }
+      result[existingIndex] = {
+        ...existing,
+        ...app,
+        id: existing.id, // Keep the established unique ID
+        emailThreads: mergedEmails,
+        actionItems: app.actionItems?.length ? app.actionItems : existing.actionItems,
+        timeline: app.timeline?.length ? app.timeline : existing.timeline,
+      };
+    } else {
+      result.push({
+        ...app,
+        id: cleanId,
+      });
+    }
+  }
+
+  return result;
+}
 
 export default function App() {
   // 1. Applications State
@@ -50,12 +125,15 @@ export default function App() {
     try {
       const saved = localStorage.getItem(APPS_STORAGE_KEY);
       if (saved) {
-        return JSON.parse(saved);
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          return sanitizeApplications(parsed);
+        }
       }
     } catch (e) {
       console.warn('Could not read saved applications', e);
     }
-    return INITIAL_SIRIM_APPLICATIONS;
+    return sanitizeApplications(INITIAL_SIRIM_APPLICATIONS);
   });
 
   // 2. Google Sheet Sync Config State
@@ -67,6 +145,25 @@ export default function App() {
       }
     } catch (e) {}
     return null;
+  });
+
+  // 2.5. Automation & Telegram Bot State
+  const [automationConfig, setAutomationConfig] = useState<AutomationConfig>(() => {
+    try {
+      const saved = localStorage.getItem(AUTOMATION_CONFIG_KEY);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        return {
+          ...DEFAULT_AUTOMATION_CONFIG,
+          ...parsed,
+          telegram: {
+            ...DEFAULT_AUTOMATION_CONFIG.telegram,
+            ...(parsed.telegram || {}),
+          },
+        };
+      }
+    } catch (e) {}
+    return DEFAULT_AUTOMATION_CONFIG;
   });
 
   // 3. Auth Session State
@@ -95,9 +192,11 @@ export default function App() {
   const [isGmailScannerOpen, setIsGmailScannerOpen] = useState(false);
   const [isNewAppModalOpen, setIsNewAppModalOpen] = useState(false);
   const [isNotificationDrawerOpen, setIsNotificationDrawerOpen] = useState(false);
+  const [isAutomationModalOpen, setIsAutomationModalOpen] = useState(false);
 
-  // Sync state
+  // Sync and Automation Runner state
   const [isSyncingSheet, setIsSyncingSheet] = useState(false);
+  const [isRunningAutomation, setIsRunningAutomation] = useState(false);
   const [syncFeedback, setSyncFeedback] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
 
   // Save applications to localStorage whenever they change
@@ -116,6 +215,164 @@ export default function App() {
       localStorage.setItem(SHEET_CONFIG_KEY, JSON.stringify(newConfig));
     } catch (e) {}
   };
+
+  // Save automationConfig to localStorage
+  const handleSaveAutomationConfig = (newConfig: AutomationConfig) => {
+    setAutomationConfig(newConfig);
+    try {
+      localStorage.setItem(AUTOMATION_CONFIG_KEY, JSON.stringify(newConfig));
+    } catch (e) {}
+  };
+
+  const handleAddAutomationLog = (entry: Omit<AutomationLogEntry, 'id'>) => {
+    const newLog: AutomationLogEntry = {
+      ...entry,
+      id: `log-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+    };
+    const updatedLogs = [newLog, ...(automationConfig.logs || [])].slice(0, 100);
+    handleSaveAutomationConfig({
+      ...automationConfig,
+      logs: updatedLogs,
+    });
+  };
+
+  // Automated Pipeline Execution Routine (Gmail Scan -> Sheet Sync -> Telegram Broadcast)
+  const handleRunAutomationNow = async () => {
+    if (isRunningAutomation) return;
+    setIsRunningAutomation(true);
+
+    handleAddAutomationLog({
+      timestamp: new Date().toISOString(),
+      type: 'SYSTEM',
+      status: 'INFO',
+      message: 'Morning Automation Pipeline cycle initiated.',
+    });
+
+    try {
+      const res = await fetch('/api/automation/run', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(authSession?.accessToken ? { Authorization: `Bearer ${authSession.accessToken}` } : {}),
+        },
+        body: JSON.stringify({
+          spreadsheetId: sheetConfig?.spreadsheetId,
+          sheetName: sheetConfig?.sheetName || 'Active CoC Applications',
+          applications: applications,
+          telegramConfig: automationConfig.telegram,
+          scanQuery: 'from:sirim.my OR subject:ecomm OR subject:sqas OR subject:sirim',
+          options: {
+            autoScanGmail: automationConfig.autoScanGmail,
+            autoSyncSheet: automationConfig.autoSyncGoogleSheet,
+            autoSendTelegram: automationConfig.autoSendTelegram,
+          },
+        }),
+      });
+
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        throw new Error(data.error || 'Failed to complete automation cycle');
+      }
+
+      // 1. Update applications if new or updated
+      if (Array.isArray(data.applications) && data.applications.length > 0) {
+        setApplications(sanitizeApplications(data.applications));
+      }
+
+      // 2. Update Google Sheet timestamp if synced
+      if (sheetConfig && data.sheetSyncResult?.success) {
+        const updatedSheetConfig: SheetSyncConfig = {
+          ...sheetConfig,
+          lastSynced: new Date().toISOString(),
+          rowsCount: (data.applications?.length || applications.length) + 1,
+        };
+        handleSaveSheetConfig(updatedSheetConfig);
+      }
+
+      // 3. Append returned automation logs
+      if (Array.isArray(data.logs)) {
+        const newLogs: AutomationLogEntry[] = data.logs.map((l: any) => ({
+          id: `log-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+          timestamp: l.timestamp || new Date().toISOString(),
+          type: l.type || 'SYSTEM',
+          status: l.status || 'INFO',
+          message: l.message || '',
+          details: l.details,
+        }));
+        const combined = [...newLogs, ...(automationConfig.logs || [])].slice(0, 100);
+
+        handleSaveAutomationConfig({
+          ...automationConfig,
+          lastRunAt: new Date().toISOString(),
+          lastRunStatus: 'SUCCESS',
+          lastRunSummary: `Scanned ${data.scanResult?.threadsFound || 0} emails, updated ${data.applications?.length || applications.length} apps, Telegram dispatched.`,
+          logs: combined,
+        });
+      }
+
+      setSyncFeedback({
+        message: `Automation Cycle Complete: Scanned Gmail, updated Sheet & dispatched Telegram briefing!`,
+        type: 'success',
+      });
+      notificationAudio.playSuccessTone();
+      confetti({ particleCount: 50, spread: 70 });
+    } catch (err: any) {
+      console.error('Automation run error:', err);
+      handleAddAutomationLog({
+        timestamp: new Date().toISOString(),
+        type: 'SYSTEM',
+        status: 'ERROR',
+        message: `Automation cycle encountered an error: ${err.message}`,
+        details: err.stack,
+      });
+
+      handleSaveAutomationConfig({
+        ...automationConfig,
+        lastRunAt: new Date().toISOString(),
+        lastRunStatus: 'ERROR',
+        lastRunSummary: `Failed: ${err.message}`,
+      });
+
+      setSyncFeedback({
+        message: `Automation error: ${err.message}`,
+        type: 'error',
+      });
+    } finally {
+      setIsRunningAutomation(false);
+      setTimeout(() => setSyncFeedback(null), 8000);
+    }
+  };
+
+  // Background Auto-Scheduler Timer (Checks every 30 seconds for scheduled morning trigger)
+  useEffect(() => {
+    if (!automationConfig.enabled) return;
+
+    const interval = setInterval(() => {
+      const now = new Date();
+      // Format current time HH:MM in Asia/Kuala_Lumpur or local time
+      const hours = String(now.getHours()).padStart(2, '0');
+      const minutes = String(now.getMinutes()).padStart(2, '0');
+      const currentTimeStr = `${hours}:${minutes}`;
+
+      if (currentTimeStr === automationConfig.scheduleTime) {
+        // Check if we haven't already run today
+        const lastRun = automationConfig.lastRunAt ? new Date(automationConfig.lastRunAt) : null;
+        const isAlreadyRunToday =
+          lastRun &&
+          lastRun.getDate() === now.getDate() &&
+          lastRun.getMonth() === now.getMonth() &&
+          lastRun.getFullYear() === now.getFullYear();
+
+        if (!isAlreadyRunToday && !isRunningAutomation) {
+          console.log(`[Scheduler] Triggering scheduled morning automation at ${currentTimeStr}`);
+          handleRunAutomationNow();
+        }
+      }
+    }, 30000);
+
+    return () => clearInterval(interval);
+  }, [automationConfig, isRunningAutomation, applications, sheetConfig, authSession]);
+
 
   // Google OAuth Client setup
   const handleConnectGoogle = async () => {
@@ -261,7 +518,7 @@ export default function App() {
 
   // Add new application from Modal / AI parser
   const handleAddApplication = (newApp: SirimApplication) => {
-    setApplications((prev) => [newApp, ...prev]);
+    setApplications((prev) => sanitizeApplications([newApp, ...prev]));
     // If sheet configured and auto-sync active, trigger sync
     if (sheetConfig?.spreadsheetId && authSession?.accessToken) {
       setTimeout(() => handleSyncToGoogleSheet(), 500);
@@ -270,11 +527,7 @@ export default function App() {
 
   // Import batch from Gmail scanner
   const handleImportApplications = (newApps: SirimApplication[]) => {
-    setApplications((prev) => {
-      const existingRefs = new Set(prev.map((a) => a.applicationRef.toLowerCase()));
-      const filteredNew = newApps.filter((a) => !existingRefs.has(a.applicationRef.toLowerCase()));
-      return [...filteredNew, ...prev];
-    });
+    setApplications((prev) => sanitizeApplications([...newApps, ...prev]));
 
     if (sheetConfig?.spreadsheetId && authSession?.accessToken) {
       setTimeout(() => handleSyncToGoogleSheet(), 500);
@@ -364,16 +617,19 @@ export default function App() {
       <Header
         sheetConfig={sheetConfig}
         authSession={authSession}
+        automationConfig={automationConfig}
         pendingActionsCount={pendingActionsCount}
         criticalActionsCount={criticalActionsCount}
         onOpenSheetModal={() => setIsSheetModalOpen(true)}
         onOpenGmailScanner={() => setIsGmailScannerOpen(true)}
         onOpenNewAppModal={() => setIsNewAppModalOpen(true)}
         onOpenNotificationDrawer={() => setIsNotificationDrawerOpen(true)}
+        onOpenAutomationModal={() => setIsAutomationModalOpen(true)}
         onConnectGoogle={handleConnectGoogle}
         onDisconnectGoogle={handleDisconnectGoogle}
         onManualSyncSheet={handleSyncToGoogleSheet}
         isSyncingSheet={isSyncingSheet}
+        isRunningAutomation={isRunningAutomation}
       />
 
       {/* Main Container */}
@@ -539,6 +795,19 @@ export default function App() {
         onToggleActionItem={handleToggleActionItem}
         onSelectApplication={handleOpenDetails}
         onQuickDraftReply={handleQuickDraftReply}
+      />
+
+      <AutomationModal
+        isOpen={isAutomationModalOpen}
+        onClose={() => setIsAutomationModalOpen(false)}
+        config={automationConfig}
+        onSaveConfig={handleSaveAutomationConfig}
+        applications={applications}
+        sheetConfig={sheetConfig}
+        authSession={authSession}
+        onRunAutomationNow={handleRunAutomationNow}
+        isRunningAutomation={isRunningAutomation}
+        onAddLog={handleAddAutomationLog}
       />
     </div>
   );

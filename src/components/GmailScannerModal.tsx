@@ -165,7 +165,7 @@ export const GmailScannerModal: React.FC<GmailScannerModalProps> = ({
           const aiResult = parseData.data;
 
           const actionItems: ActionItem[] = (aiResult.actionItems || []).map((a: any, idx: number) => ({
-            id: `act-${threadId}-${idx}-${Date.now()}`,
+            id: `act-${threadId}-${idx}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
             title: a.title,
             description: a.description,
             assignedTo: a.assignedTo || 'APPLICANT',
@@ -178,7 +178,7 @@ export const GmailScannerModal: React.FC<GmailScannerModalProps> = ({
 
           const timeline: TimelineEvent[] = [
             {
-              id: `tl-${threadId}-1`,
+              id: `tl-${threadId}-${Date.now()}-1`,
               date: aiResult.timelineEvent?.date || new Date().toISOString().split('T')[0],
               title: aiResult.timelineEvent?.title || 'Communication Ingested from Gmail',
               description: aiResult.timelineEvent?.description || aiResult.summary || 'Email thread imported.',
@@ -208,6 +208,8 @@ export const GmailScannerModal: React.FC<GmailScannerModalProps> = ({
             processingFeeRm: aiResult.processingFeeRm || undefined,
             paymentStatus: aiResult.paymentStatus || 'NOT_APPLICABLE',
             notes: aiResult.summary || '',
+            emailSubject: lastMessage.subject || `SIRIM / e-ComM Correspondence (${aiResult.applicationRef || 'Update'})`,
+            gmailThreadLink: `https://mail.google.com/mail/u/0/#all/${threadId}`,
             actionItems,
             timeline,
             emailThreads: messages,
