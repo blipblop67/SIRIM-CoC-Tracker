@@ -120,20 +120,20 @@ function sanitizeApplications(apps: SirimApplication[]): SirimApplication[] {
 }
 
 export default function App() {
-  // 1. Applications State
+  // 1. Applications State (Starts clean with 0 dummy data)
   const [applications, setApplications] = useState<SirimApplication[]>(() => {
     try {
       const saved = localStorage.getItem(APPS_STORAGE_KEY);
       if (saved) {
         const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed) && parsed.length > 0) {
+        if (Array.isArray(parsed)) {
           return sanitizeApplications(parsed);
         }
       }
     } catch (e) {
       console.warn('Could not read saved applications', e);
     }
-    return sanitizeApplications(INITIAL_SIRIM_APPLICATIONS);
+    return [];
   });
 
   // 2. Google Sheet Sync Config State
@@ -689,7 +689,50 @@ export default function App() {
         />
 
         {/* Applications List */}
-        {filteredApplications.length === 0 ? (
+        {applications.length === 0 ? (
+          <div className="bg-white border border-slate-200 rounded-2xl p-10 sm:p-14 text-center space-y-6 shadow-xs max-w-2xl mx-auto my-6">
+            <div className="w-16 h-16 rounded-3xl bg-indigo-50 border border-indigo-100 flex items-center justify-center mx-auto text-indigo-600 shadow-xs">
+              <ShieldCheck className="w-8 h-8" />
+            </div>
+            <div className="space-y-2">
+              <h3 className="text-xl font-bold text-slate-800">No SIRIM Applications Loaded</h3>
+              <p className="text-sm text-slate-500 max-w-md mx-auto leading-relaxed">
+                Your tracker is clean and ready. Connect your Google account to scan for SIRIM e-ComM correspondence, sync with your Google Sheet, or manually ingest an application.
+              </p>
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-2">
+              <button
+                onClick={() => {
+                  if (!authSession?.isAuthenticated) {
+                    handleConnectGoogle();
+                  } else {
+                    setIsGmailScannerOpen(true);
+                  }
+                }}
+                className="flex flex-col items-center justify-center gap-2 p-4 rounded-xl border border-indigo-200 bg-indigo-50/50 hover:bg-indigo-50 hover:border-indigo-300 text-indigo-700 font-semibold text-xs transition-all group"
+              >
+                <Mail className="w-5 h-5 text-indigo-600 group-hover:scale-110 transition-transform" />
+                <span>Scan Gmail Inbox</span>
+              </button>
+
+              <button
+                onClick={() => setIsNewAppModalOpen(true)}
+                className="flex flex-col items-center justify-center gap-2 p-4 rounded-xl border border-slate-200 bg-slate-50 hover:bg-slate-100 hover:border-slate-300 text-slate-700 font-semibold text-xs transition-all group"
+              >
+                <Plus className="w-5 h-5 text-slate-600 group-hover:scale-110 transition-transform" />
+                <span>Add / Ingest Email</span>
+              </button>
+
+              <button
+                onClick={() => setIsSheetModalOpen(true)}
+                className="flex flex-col items-center justify-center gap-2 p-4 rounded-xl border border-emerald-200 bg-emerald-50/50 hover:bg-emerald-50 hover:border-emerald-300 text-emerald-700 font-semibold text-xs transition-all group"
+              >
+                <FileSpreadsheet className="w-5 h-5 text-emerald-600 group-hover:scale-110 transition-transform" />
+                <span>Connect Google Sheet</span>
+              </button>
+            </div>
+          </div>
+        ) : filteredApplications.length === 0 ? (
           <div className="bg-white border border-slate-200 rounded-2xl p-12 text-center space-y-4 shadow-xs">
             <div className="w-12 h-12 rounded-2xl bg-slate-100 flex items-center justify-center mx-auto text-slate-400">
               <Search className="w-6 h-6" />
