@@ -203,8 +203,8 @@ export default function App() {
     return DEFAULT_AUTOMATION_CONFIG;
   });
 
-  // 3. Auth Session State
-  const [authSession, setAuthSession] = useState<UserAuthSession | null>(null);
+  // 3. Auth Session State (persisted across page reloads via localStorage)
+  const [authSession, setAuthSession] = useState<UserAuthSession | null>(() => getStoredAuthSession());
 
   useEffect(() => {
     const unsubscribe = initAuth(
