@@ -9,6 +9,7 @@ import {
   Check,
   Mail,
   ExternalLink,
+  Trash2,
 } from 'lucide-react';
 import { SirimApplication } from '../types';
 import {
@@ -23,12 +24,14 @@ interface ApplicationTableProps {
   applications: SirimApplication[];
   onSelect: (app: SirimApplication) => void;
   onQuickDraftReply: (app: SirimApplication) => void;
+  onDelete?: (appId: string, e: React.MouseEvent) => void;
 }
 
 export const ApplicationTable: React.FC<ApplicationTableProps> = ({
   applications,
   onSelect,
   onQuickDraftReply,
+  onDelete,
 }) => {
   const [copiedId, setCopiedId] = React.useState<string | null>(null);
 
@@ -238,6 +241,15 @@ export const ApplicationTable: React.FC<ApplicationTableProps> = ({
                       >
                         <ChevronRight className="w-4 h-4" />
                       </button>
+                      {onDelete && (
+                        <button
+                          onClick={(e) => onDelete(app.id, e)}
+                          className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded transition-colors"
+                          title="Delete this application"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      )}
                     </div>
                   </td>
                 </tr>

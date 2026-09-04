@@ -6,6 +6,7 @@ import {
   List,
   SlidersHorizontal,
   X,
+  Trash2,
 } from 'lucide-react';
 import { CertificationScheme } from '../types';
 
@@ -21,6 +22,8 @@ interface FilterBarProps {
   viewMode: 'grid' | 'table';
   onViewModeChange: (mode: 'grid' | 'table') => void;
   totalFilteredCount: number;
+  totalAppsCount?: number;
+  onClearAll?: () => void;
 }
 
 export const FilterBar: React.FC<FilterBarProps> = ({
@@ -35,6 +38,8 @@ export const FilterBar: React.FC<FilterBarProps> = ({
   viewMode,
   onViewModeChange,
   totalFilteredCount,
+  totalAppsCount = 0,
+  onClearAll,
 }) => {
   const statusTabs = [
     { id: 'ALL', label: 'All Applications' },
@@ -143,6 +148,17 @@ export const FilterBar: React.FC<FilterBarProps> = ({
             className="text-xs text-slate-500 hover:text-slate-800 underline font-medium cursor-pointer"
           >
             Reset
+          </button>
+        )}
+
+        {totalAppsCount > 0 && onClearAll && (
+          <button
+            onClick={onClearAll}
+            className="flex items-center gap-1 px-2.5 py-1 text-xs font-semibold text-rose-600 hover:text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 rounded-md transition-colors shrink-0 shadow-2xs"
+            title="Clear all applications from tracker"
+          >
+            <Trash2 className="w-3.5 h-3.5" />
+            <span>Clear All</span>
           </button>
         )}
       </div>

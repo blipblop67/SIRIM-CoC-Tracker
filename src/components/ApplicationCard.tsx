@@ -25,13 +25,14 @@ import {
   formatDate,
   getGmailThreadUrl,
 } from '../utils/formatters';
-import { Mail } from 'lucide-react';
+import { Mail, Trash2 } from 'lucide-react';
 
 interface ApplicationCardProps {
   application: SirimApplication;
   onSelect: (app: SirimApplication) => void;
   onToggleActionItem: (appId: string, actionItemId: string) => void;
   onQuickDraftReply: (app: SirimApplication) => void;
+  onDelete?: (appId: string, e: React.MouseEvent) => void;
 }
 
 export const ApplicationCard: React.FC<ApplicationCardProps> = ({
@@ -39,6 +40,7 @@ export const ApplicationCard: React.FC<ApplicationCardProps> = ({
   onSelect,
   onToggleActionItem,
   onQuickDraftReply,
+  onDelete,
 }) => {
   const [copiedRef, setCopiedRef] = React.useState(false);
   const statusInfo = getStatusBadgeInfo(application.status);
@@ -248,6 +250,16 @@ export const ApplicationCard: React.FC<ApplicationCardProps> = ({
           >
             Details →
           </button>
+
+          {onDelete && (
+            <button
+              onClick={(e) => onDelete(application.id, e)}
+              className="p-1 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-md transition-colors"
+              title="Delete this application record"
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+            </button>
+          )}
         </div>
       </div>
     </div>

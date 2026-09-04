@@ -22,6 +22,7 @@ import {
   HelpCircle,
   ExternalLink,
   MessageSquare,
+  Trash2,
 } from 'lucide-react';
 import confetti from 'canvas-confetti';
 import {
@@ -47,6 +48,7 @@ interface ApplicationDetailModalProps {
   isOpen: boolean;
   onClose: () => void;
   onUpdateApplication: (updatedApp: SirimApplication) => void;
+  onDeleteApplication?: (appId: string) => void;
   initialTab?: 'actions' | 'timeline' | 'emails' | 'ai-reply' | 'dossier';
 }
 
@@ -55,6 +57,7 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({
   isOpen,
   onClose,
   onUpdateApplication,
+  onDeleteApplication,
   initialTab = 'actions',
 }) => {
   if (!isOpen || !application) return null;
@@ -257,6 +260,17 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({
           </div>
 
           <div className="flex items-center gap-2 shrink-0">
+            {onDeleteApplication && (
+              <button
+                onClick={() => onDeleteApplication(application.id)}
+                className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-rose-950/80 hover:bg-rose-900 text-rose-200 border border-rose-800 text-xs font-semibold transition-colors"
+                title="Delete this application record from tracker"
+              >
+                <Trash2 className="w-3.5 h-3.5 text-rose-300" />
+                <span className="hidden sm:inline">Delete</span>
+              </button>
+            )}
+
             <a
               href={getGmailThreadUrl(application)}
               target="_blank"

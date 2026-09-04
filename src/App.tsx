@@ -15,6 +15,7 @@ import {
   Layers,
   ArrowRight,
   CheckCircle2,
+  Trash2,
 } from 'lucide-react';
 import confetti from 'canvas-confetti';
 import {
@@ -44,7 +45,8 @@ import {
 } from './utils/auth';
 import { notificationAudio } from './utils/audio';
 
-const APPS_STORAGE_KEY = 'sirim_coc_applications_v1';
+const APPS_STORAGE_KEY = 'sirim_coc_applications_v2';
+const LEGACY_APPS_STORAGE_KEY_V1 = 'sirim_coc_applications_v1';
 const SHEET_CONFIG_KEY = 'sirim_coc_sheet_config_v1';
 const AUTOMATION_CONFIG_KEY = 'sirim_coc_automation_config_v1';
 
@@ -76,12 +78,42 @@ const DEFAULT_AUTOMATION_CONFIG: AutomationConfig = {
   ],
 };
 
-// Deduplicate applications and ensure unique keys
+// Deduplicate applications and ensure unique keys, removing any legacy mock samples
 function sanitizeApplications(apps: SirimApplication[]): SirimApplication[] {
   const result: SirimApplication[] = [];
 
   for (const app of apps) {
-    if (!app) continue;
+    if (!app || typeof app !== 'object') continue;
+
+    const id = String(app.id || '');
+    const model = String(app.modelNumber || '');
+    const name = String(app.productName || '');
+
+    // Exclude mock dummy items
+    if (
+      id.startsWith('sirim-app-00') ||
+      id === 'sirim-app-001' ||
+      id === 'sirim-app-002' ||
+      id === 'sirim-app-003' ||
+      id === 'sirim-app-004'
+    ) {
+      continue;
+    }
+    if (
+      model === 'CYT-FEATHER-S3-V2' ||
+      model === 'CYT-GAN100-4P' ||
+      model === 'CYT-SOIL-V1'
+    ) {
+      continue;
+    }
+    if (
+      name.includes('Maker Feather') ||
+      name.includes('100W GaN Desktop') ||
+      name.includes('Smart Soil')
+    ) {
+      continue;
+    }
+
     const cleanId = app.id || `sirim-app-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
     const cleanRef = (app.applicationRef || '').trim().toLowerCase();
 
@@ -123,6 +155,11 @@ export default function App() {
   // 1. Applications State (Starts clean with 0 dummy data)
   const [applications, setApplications] = useState<SirimApplication[]>(() => {
     try {
+      // Wipe legacy storage keys that held dummy mock data
+      localStorage.removeItem(LEGACY_APPS_STORAGE_KEY_V1);
+      localStorage.removeItem('sirim_applications_data_v2');
+      localStorage.removeItem('sirim_applications_data_v1');
+
       const saved = localStorage.getItem(APPS_STORAGE_KEY);
       if (saved) {
         const parsed = JSON.parse(saved);
@@ -548,6 +585,49 @@ export default function App() {
     setIsDetailModalOpen(true);
   };
 
+  // Clear all data to allow fresh testing with real emails
+  const handleClearAllApplications = () => {
+    if (
+      window.confirm(
+        `Clear all ${applications.length} applications from the tracker? This gives you a 100% clean interface to scan and test with your real SIRIM emails.`
+      )
+    ) {
+      setApplications([]);
+      localStorage.removeItem(APPS_STORAGE_KEY);
+      localStorage.removeItem(LEGACY_APPS_STORAGE_KEY_V1);
+      localStorage.removeItem('sirim_applications_data_v2');
+      localStorage.removeItem('sirim_applications_data_v1');
+      setSelectedApplication(null);
+      setIsDetailModalOpen(false);
+      notificationAudio.playSuccessTone();
+      setSyncFeedback({
+        type: 'success',
+        message: 'All application records cleared. Tracker is ready for your real emails!',
+      });
+      setTimeout(() => setSyncFeedback(null), 4000);
+    }
+  };
+
+  // Delete individual application
+  const handleDeleteApplication = (appId: string, e?: React.MouseEvent) => {
+    if (e) {
+      e.stopPropagation();
+    }
+    if (window.confirm('Are you sure you want to remove this application from the tracker?')) {
+      setApplications((prev) => prev.filter((a) => a.id !== appId));
+      if (selectedApplication?.id === appId) {
+        setIsDetailModalOpen(false);
+        setSelectedApplication(null);
+      }
+      notificationAudio.playSuccessTone();
+      setSyncFeedback({
+        type: 'success',
+        message: 'Application removed from tracker.',
+      });
+      setTimeout(() => setSyncFeedback(null), 3000);
+    }
+  };
+
   // Filtered Applications
   const filteredApplications = useMemo(() => {
     return applications.filter((app) => {
@@ -620,6 +700,7 @@ export default function App() {
         automationConfig={automationConfig}
         pendingActionsCount={pendingActionsCount}
         criticalActionsCount={criticalActionsCount}
+        applicationsCount={applications.length}
         onOpenSheetModal={() => setIsSheetModalOpen(true)}
         onOpenGmailScanner={() => setIsGmailScannerOpen(true)}
         onOpenNewAppModal={() => setIsNewAppModalOpen(true)}
@@ -628,6 +709,7 @@ export default function App() {
         onConnectGoogle={handleConnectGoogle}
         onDisconnectGoogle={handleDisconnectGoogle}
         onManualSyncSheet={handleSyncToGoogleSheet}
+        onClearAll={handleClearAllApplications}
         isSyncingSheet={isSyncingSheet}
         isRunningAutomation={isRunningAutomation}
       />
@@ -665,42 +747,60 @@ export default function App() {
           </div>
         )}
 
-        {/* Stats & KPI Highlights */}
-        <StatsBanner
-          applications={applications}
-          sheetConfig={sheetConfig}
-          onFilterStatus={(st) => setStatusFilter(st)}
-          onOpenSheetModal={() => setIsSheetModalOpen(true)}
-        />
+        {/* Stats & KPI Highlights (rendered only when active applications exist) */}
+        {applications.length > 0 && (
+          <>
+            <StatsBanner
+              applications={applications}
+              sheetConfig={sheetConfig}
+              onFilterStatus={(st) => setStatusFilter(st)}
+              onOpenSheetModal={() => setIsSheetModalOpen(true)}
+            />
 
-        {/* Search, Status Tabs & Filters */}
-        <FilterBar
-          searchQuery={searchQuery}
-          onSearchChange={setSearchQuery}
-          statusFilter={statusFilter}
-          onStatusFilterChange={setStatusFilter}
-          schemeFilter={schemeFilter}
-          onSchemeFilterChange={setSchemeFilter}
-          assigneeFilter={assigneeFilter}
-          onAssigneeFilterChange={setAssigneeFilter}
-          viewMode={viewMode}
-          onViewModeChange={setViewMode}
-          totalFilteredCount={filteredApplications.length}
-        />
+            {/* Search, Status Tabs & Filters */}
+            <FilterBar
+              searchQuery={searchQuery}
+              onSearchChange={setSearchQuery}
+              statusFilter={statusFilter}
+              onStatusFilterChange={setStatusFilter}
+              schemeFilter={schemeFilter}
+              onSchemeFilterChange={setSchemeFilter}
+              assigneeFilter={assigneeFilter}
+              onAssigneeFilterChange={setAssigneeFilter}
+              viewMode={viewMode}
+              onViewModeChange={setViewMode}
+              totalFilteredCount={filteredApplications.length}
+              totalAppsCount={applications.length}
+              onClearAll={handleClearAllApplications}
+            />
+          </>
+        )}
 
         {/* Applications List */}
         {applications.length === 0 ? (
-          <div className="bg-white border border-slate-200 rounded-2xl p-10 sm:p-14 text-center space-y-6 shadow-xs max-w-2xl mx-auto my-6">
-            <div className="w-16 h-16 rounded-3xl bg-indigo-50 border border-indigo-100 flex items-center justify-center mx-auto text-indigo-600 shadow-xs">
-              <ShieldCheck className="w-8 h-8" />
+          <div className="bg-white border border-slate-200 rounded-2xl p-8 sm:p-12 text-center space-y-7 shadow-xs max-w-2xl mx-auto my-6">
+            <div className="relative inline-flex items-center justify-center">
+              <div className="w-16 h-16 rounded-2xl bg-indigo-50 border border-indigo-100 flex items-center justify-center text-indigo-600 shadow-xs">
+                <ShieldCheck className="w-8 h-8" />
+              </div>
+              <span className="absolute -top-1 -right-1 flex h-3.5 w-3.5">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                <span className="relative inline-flex rounded-full h-3.5 w-3.5 bg-emerald-500 border-2 border-white"></span>
+              </span>
             </div>
+
             <div className="space-y-2">
+              <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-50 border border-emerald-200 text-emerald-700 text-xs font-semibold">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+                Clean Interface • Ready for Real Emails
+              </div>
               <h3 className="text-xl font-bold text-slate-800">No SIRIM Applications Loaded</h3>
               <p className="text-sm text-slate-500 max-w-md mx-auto leading-relaxed">
-                Your tracker is clean and ready. Connect your Google account to scan for SIRIM e-ComM correspondence, sync with your Google Sheet, or manually ingest an application.
+                All sample records have been removed. You can now scan your Gmail inbox for official SIRIM e-ComM correspondence, sync from Google Sheets, or paste an email thread.
               </p>
             </div>
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-2">
+
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-1">
               <button
                 onClick={() => {
                   if (!authSession?.isAuthenticated) {
@@ -709,26 +809,35 @@ export default function App() {
                     setIsGmailScannerOpen(true);
                   }
                 }}
-                className="flex flex-col items-center justify-center gap-2 p-4 rounded-xl border border-indigo-200 bg-indigo-50/50 hover:bg-indigo-50 hover:border-indigo-300 text-indigo-700 font-semibold text-xs transition-all group"
+                className="flex flex-col items-center justify-center gap-2 p-4 rounded-xl border border-indigo-200 bg-indigo-50/50 hover:bg-indigo-50 hover:border-indigo-300 text-indigo-700 font-semibold text-xs transition-all group shadow-2xs"
               >
                 <Mail className="w-5 h-5 text-indigo-600 group-hover:scale-110 transition-transform" />
                 <span>Scan Gmail Inbox</span>
+                <span className="text-[10px] text-indigo-500/80 font-normal">
+                  {authSession?.isAuthenticated ? 'Logged in & ready' : 'Sign in to scan'}
+                </span>
               </button>
 
               <button
                 onClick={() => setIsNewAppModalOpen(true)}
-                className="flex flex-col items-center justify-center gap-2 p-4 rounded-xl border border-slate-200 bg-slate-50 hover:bg-slate-100 hover:border-slate-300 text-slate-700 font-semibold text-xs transition-all group"
+                className="flex flex-col items-center justify-center gap-2 p-4 rounded-xl border border-slate-200 bg-slate-50 hover:bg-slate-100 hover:border-slate-300 text-slate-700 font-semibold text-xs transition-all group shadow-2xs"
               >
                 <Plus className="w-5 h-5 text-slate-600 group-hover:scale-110 transition-transform" />
                 <span>Add / Ingest Email</span>
+                <span className="text-[10px] text-slate-400 font-normal">
+                  Paste raw email text
+                </span>
               </button>
 
               <button
                 onClick={() => setIsSheetModalOpen(true)}
-                className="flex flex-col items-center justify-center gap-2 p-4 rounded-xl border border-emerald-200 bg-emerald-50/50 hover:bg-emerald-50 hover:border-emerald-300 text-emerald-700 font-semibold text-xs transition-all group"
+                className="flex flex-col items-center justify-center gap-2 p-4 rounded-xl border border-emerald-200 bg-emerald-50/50 hover:bg-emerald-50 hover:border-emerald-300 text-emerald-700 font-semibold text-xs transition-all group shadow-2xs"
               >
                 <FileSpreadsheet className="w-5 h-5 text-emerald-600 group-hover:scale-110 transition-transform" />
                 <span>Connect Google Sheet</span>
+                <span className="text-[10px] text-emerald-600/80 font-normal">
+                  {sheetConfig?.spreadsheetId ? 'Sheet connected' : 'Link CoC spreadsheet'}
+                </span>
               </button>
             </div>
           </div>
@@ -772,6 +881,7 @@ export default function App() {
                 onSelect={handleOpenDetails}
                 onToggleActionItem={handleToggleActionItem}
                 onQuickDraftReply={handleQuickDraftReply}
+                onDelete={handleDeleteApplication}
               />
             ))}
           </div>
@@ -780,6 +890,7 @@ export default function App() {
             applications={filteredApplications}
             onSelect={handleOpenDetails}
             onQuickDraftReply={handleQuickDraftReply}
+            onDelete={handleDeleteApplication}
           />
         )}
       </main>
@@ -804,6 +915,7 @@ export default function App() {
         application={selectedApplication}
         onClose={() => setIsDetailModalOpen(false)}
         onUpdateApplication={handleUpdateApplication}
+        onDeleteApplication={handleDeleteApplication}
         initialTab={detailInitialTab}
       />
 

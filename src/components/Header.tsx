@@ -13,6 +13,7 @@ import {
   Sparkles,
   Zap,
   Send,
+  Trash2,
 } from 'lucide-react';
 import { AutomationConfig, SheetSyncConfig, UserAuthSession } from '../types';
 
@@ -22,6 +23,7 @@ interface HeaderProps {
   automationConfig: AutomationConfig;
   pendingActionsCount: number;
   criticalActionsCount: number;
+  applicationsCount?: number;
   onOpenSheetModal: () => void;
   onOpenGmailScanner: () => void;
   onOpenNewAppModal: () => void;
@@ -30,6 +32,7 @@ interface HeaderProps {
   onConnectGoogle: () => void;
   onDisconnectGoogle: () => void;
   onManualSyncSheet: () => void;
+  onClearAll?: () => void;
   isSyncingSheet: boolean;
   isRunningAutomation: boolean;
 }
@@ -40,6 +43,7 @@ export const Header: React.FC<HeaderProps> = ({
   automationConfig,
   pendingActionsCount,
   criticalActionsCount,
+  applicationsCount = 0,
   onOpenSheetModal,
   onOpenGmailScanner,
   onOpenNewAppModal,
@@ -48,6 +52,7 @@ export const Header: React.FC<HeaderProps> = ({
   onConnectGoogle,
   onDisconnectGoogle,
   onManualSyncSheet,
+  onClearAll,
   isSyncingSheet,
   isRunningAutomation,
 }) => {
@@ -148,6 +153,16 @@ export const Header: React.FC<HeaderProps> = ({
             <Sparkles className="w-3.5 h-3.5 text-indigo-200" />
             <span className="hidden sm:inline">Ingest Email</span>
           </button>
+          {applicationsCount > 0 && onClearAll && (
+            <button
+              onClick={onClearAll}
+              className="hidden xl:flex items-center gap-1 text-xs text-rose-300 hover:text-rose-100 bg-rose-950/60 hover:bg-rose-900/80 border border-rose-800/60 px-2.5 py-1.5 rounded-lg transition-colors font-medium shadow-xs"
+              title="Clear all application data and start fresh"
+            >
+              <Trash2 className="w-3.5 h-3.5 text-rose-400" />
+              <span>Clear Data</span>
+            </button>
+          )}
         </div>
 
         <div className="h-6 w-px bg-slate-700 hidden sm:block"></div>
