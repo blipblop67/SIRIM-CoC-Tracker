@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   X,
   Zap,
@@ -68,6 +68,12 @@ export const AutomationModal: React.FC<AutomationModalProps> = ({
 
   // Form saved notification state
   const [isSaved, setIsSaved] = useState(false);
+  const [isSendingBriefing, setIsSendingBriefing] = useState(false);
+
+  // Synchronize localConfig when external config prop updates
+  useEffect(() => {
+    setLocalConfig(config);
+  }, [config]);
 
   if (!isOpen) return null;
 
@@ -92,8 +98,6 @@ export const AutomationModal: React.FC<AutomationModalProps> = ({
     setIsSaved(true);
     setTimeout(() => setIsSaved(false), 2000);
   };
-
-  const [isSendingBriefing, setIsSendingBriefing] = useState(false);
 
   // Test Telegram Connection
   const handleTestTelegram = async () => {

@@ -1024,60 +1024,72 @@ export default function App() {
       </footer>
 
       {/* Modals & Drawers */}
-      <ApplicationDetailModal
-        isOpen={isDetailModalOpen}
-        application={selectedApplication}
-        onClose={() => setIsDetailModalOpen(false)}
-        onUpdateApplication={handleUpdateApplication}
-        onDeleteApplication={handleDeleteApplication}
-        initialTab={detailInitialTab}
-      />
+      {isDetailModalOpen && selectedApplication && (
+        <ApplicationDetailModal
+          isOpen={isDetailModalOpen}
+          application={selectedApplication}
+          onClose={() => setIsDetailModalOpen(false)}
+          onUpdateApplication={handleUpdateApplication}
+          onDeleteApplication={handleDeleteApplication}
+          initialTab={detailInitialTab}
+        />
+      )}
 
-      <GoogleSheetSyncModal
-        isOpen={isSheetModalOpen}
-        onClose={() => setIsSheetModalOpen(false)}
-        sheetConfig={sheetConfig}
-        authSession={authSession}
-        applications={applications}
-        onSaveSheetConfig={handleSaveSheetConfig}
-        onConnectGoogle={handleConnectGoogle}
-      />
+      {isSheetModalOpen && (
+        <GoogleSheetSyncModal
+          isOpen={isSheetModalOpen}
+          onClose={() => setIsSheetModalOpen(false)}
+          sheetConfig={sheetConfig}
+          authSession={authSession}
+          applications={applications}
+          onSaveSheetConfig={handleSaveSheetConfig}
+          onConnectGoogle={handleConnectGoogle}
+        />
+      )}
 
-      <GmailScannerModal
-        isOpen={isGmailScannerOpen}
-        onClose={() => setIsGmailScannerOpen(false)}
-        authSession={authSession}
-        onConnectGoogle={handleConnectGoogle}
-        onImportApplications={handleImportApplications}
-      />
+      {isGmailScannerOpen && (
+        <GmailScannerModal
+          isOpen={isGmailScannerOpen}
+          onClose={() => setIsGmailScannerOpen(false)}
+          authSession={authSession}
+          onConnectGoogle={handleConnectGoogle}
+          onImportApplications={handleImportApplications}
+        />
+      )}
 
-      <NewApplicationModal
-        isOpen={isNewAppModalOpen}
-        onClose={() => setIsNewAppModalOpen(false)}
-        onAddApplication={handleAddApplication}
-      />
+      {isNewAppModalOpen && (
+        <NewApplicationModal
+          isOpen={isNewAppModalOpen}
+          onClose={() => setIsNewAppModalOpen(false)}
+          onAddApplication={handleAddApplication}
+        />
+      )}
 
-      <NotificationDrawer
-        isOpen={isNotificationDrawerOpen}
-        onClose={() => setIsNotificationDrawerOpen(false)}
-        applications={applications}
-        onToggleActionItem={handleToggleActionItem}
-        onSelectApplication={handleOpenDetails}
-        onQuickDraftReply={handleQuickDraftReply}
-      />
+      {isNotificationDrawerOpen && (
+        <NotificationDrawer
+          isOpen={isNotificationDrawerOpen}
+          onClose={() => setIsNotificationDrawerOpen(false)}
+          applications={applications}
+          onToggleActionItem={handleToggleActionItem}
+          onSelectApplication={handleOpenDetails}
+          onQuickDraftReply={handleQuickDraftReply}
+        />
+      )}
 
-      <AutomationModal
-        isOpen={isAutomationModalOpen}
-        onClose={() => setIsAutomationModalOpen(false)}
-        config={automationConfig}
-        onSaveConfig={handleSaveAutomationConfig}
-        applications={applications}
-        sheetConfig={sheetConfig}
-        authSession={authSession}
-        onRunAutomationNow={handleRunAutomationNow}
-        isRunningAutomation={isRunningAutomation}
-        onAddLog={handleAddAutomationLog}
-      />
+      {isAutomationModalOpen && (
+        <AutomationModal
+          isOpen={isAutomationModalOpen}
+          onClose={() => setIsAutomationModalOpen(false)}
+          config={automationConfig}
+          onSaveConfig={handleSaveAutomationConfig}
+          applications={applications}
+          sheetConfig={sheetConfig}
+          authSession={authSession}
+          onRunAutomationNow={handleRunAutomationNow}
+          isRunningAutomation={isRunningAutomation}
+          onAddLog={handleAddAutomationLog}
+        />
+      )}
     </div>
   );
 }
