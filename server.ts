@@ -82,20 +82,40 @@ function fallbackHeuristicSirimParser(emailSubject: string, emailBody: string, s
   // Officer name
   const officerMatch = fullText.match(/(?:Officer|Regards|From|Auditor|Evaluator)[:,\s]+([A-Za-z\s]+(?:Ahmad|Zulkifli|Subramaniam|Othman|Ibrahim|Nurul|Farhan|Kavitha|Zainab|Faiz|Mohd|Bin|Binti)[A-Za-z\s]*)/i);
   const officerName = officerMatch ? officerMatch[1].trim().slice(0, 40) : undefined;
+
+  // Extract Standards (e.g., MCMC MTSFB TC T007, MS IEC 62368-1, etc.)
+  const standardsMatches = fullText.match(/(?:MS\s*(?:IEC\s*)?[A-Z0-9-]+(?::[0-9]{4})?|MCMC\s*MTSFB\s*[A-Z0-9\s-]+|CISPR\s*[0-9]+|ETSI\s*EN\s*[0-9\s-]+)/gi);
+  const detectedStandards = standardsMatches ? Array.from(new Set(standardsMatches.map(s => s.trim()))) : [];
+
+  // Extract Courier / Tracking info
+  const courierMatch = fullText.match(/(?:tracking(?:\s*no\.?|\s*number)?|consignment(?:\s*no\.?)?|courier(?:\s*ref)?|gdex|pos\s*laju|dhl)[:\s]+([A-Za-z0-9-_]{6,25})/i);
+  const courierTracking = courierMatch ? courierMatch[1].trim() : undefined;
+
+  // Extract Quotation or Invoice No
+  const quoteMatch = fullText.match(/(?:quotation(?:\s*no\.?)?|inv(?:oice)?(?:\s*no\.?)?|receipt(?:\s*no\.?)?)[:\s]+([A-Za-z0-9-_/]{5,25})/i);
+  const quotationOrInvoiceNo = quoteMatch ? quoteMatch[1].trim() : undefined;
+
+  // Extract Fee
+  const feeMatch = fullText.match(/(?:RM|MYR)\s*([0-9,]+(?:\.[0-9]{2})?)/i);
+  const processingFeeRm = feeMatch ? parseFloat(feeMatch[1].replace(/,/g, "")) : undefined;
+
+  // Extract Certificate No & Expiry
+  const certMatch = fullText.match(/(?:certificate(?:\s*no\.?|\s*number)?|coc(?:\s*no\.?)?)[:\s]+([A-Za-z0-9-_/]{6,30})/i);
+  const certificateNo = certMatch ? certMatch[1].trim() : undefined;
   
-  // Status detection
+  // Status detection based on whole history with priority to latest keywords
   let status = "UNDER_REVIEW";
   let scheme = "Type Approval (MCMC/SIRIM)";
   const lower = fullText.toLowerCase();
 
-  if (lower.includes("rfi") || lower.includes("request for information") || lower.includes("clarification") || lower.includes("amendment")) {
+  if (lower.includes("approved") || lower.includes("certificate issued") || lower.includes("coa issued") || lower.includes("issuance of certificate")) {
+    status = "APPROVED";
+  } else if (lower.includes("rfi") || lower.includes("request for information") || lower.includes("clarification") || lower.includes("amendment")) {
     status = "RFI_ACTION_REQUIRED";
   } else if (lower.includes("sample") && (lower.includes("submit") || lower.includes("courier") || lower.includes("request") || lower.includes("call notice"))) {
     status = "SAMPLE_REQUESTED";
   } else if (lower.includes("invoice") || lower.includes("fee") || lower.includes("payment pending") || lower.includes("unpaid")) {
     status = "PAYMENT_PENDING";
-  } else if (lower.includes("approved") || lower.includes("certificate issued") || lower.includes("coa issued") || lower.includes("issuance of certificate")) {
-    status = "APPROVED";
   } else if (lower.includes("testing in progress") || lower.includes("lab test")) {
     status = "TESTING_IN_PROGRESS";
   }
@@ -110,7 +130,7 @@ function fallbackHeuristicSirimParser(emailSubject: string, emailBody: string, s
   if (status === "RFI_ACTION_REQUIRED") {
     actionItems.push({
       title: "Provide technical documentation or clarification requested by SIRIM",
-      description: "Review SIRIM queries and reply with updated schematics, manual, or test reports.",
+      description: "Review SIRIM queries and reply with updated schematics, user manual, or RF test reports.",
       assignedTo: "APPLICANT",
       dueDate: new Date(Date.now() + 7 * 86400000).toISOString().split("T")[0],
       priority: "HIGH",
@@ -119,8 +139,8 @@ function fallbackHeuristicSirimParser(emailSubject: string, emailBody: string, s
     });
   } else if (status === "SAMPLE_REQUESTED") {
     actionItems.push({
-      title: "Deliver test samples to SIRIM QAS Lab (Shah Alam)",
-      description: "Prepare and courier hardware test units along with power cables and RF test modes.",
+      title: "Deliver test samples to SIRIM QAS Lab (Building 25, Shah Alam)",
+      description: "Prepare hardware test units along with power adaptors, test cables, and continuous RF test mode firmware.",
       assignedTo: "APPLICANT",
       dueDate: new Date(Date.now() + 14 * 86400000).toISOString().split("T")[0],
       priority: "HIGH",
@@ -130,12 +150,62 @@ function fallbackHeuristicSirimParser(emailSubject: string, emailBody: string, s
   } else if (status === "PAYMENT_PENDING") {
     actionItems.push({
       title: "Settle outstanding SIRIM processing fee invoice via e-ComM",
-      description: "Submit payment online and upload the payment receipt.",
+      description: `Submit payment online${processingFeeRm ? ` (RM ${processingFeeRm})` : ""} and upload payment receipt.`,
       assignedTo: "APPLICANT",
       dueDate: new Date(Date.now() + 5 * 86400000).toISOString().split("T")[0],
       priority: "CRITICAL",
       requiredActionType: "PAY_FEE",
       emailSourceSnippet: cleanSubject,
+    });
+  }
+
+  // Build timeline events (if multiple messages are embedded in the body, parse each one)
+  const timelineEvents: any[] = [];
+  const messageChunks = emailBody.split(/(?=\[[^\]]+ \([^\)]+\)\]:)/);
+  if (messageChunks.length > 1) {
+    messageChunks.forEach((chunk, i) => {
+      const matchHeader = chunk.match(/\[([^\]]+) \(([^\)]+)\)\]:/);
+      const chunkSender = matchHeader ? matchHeader[1] : sender || "SIRIM QAS";
+      const chunkDate = matchHeader ? matchHeader[2] : date;
+      const parsedDate = chunkDate ? new Date(chunkDate).toISOString().split("T")[0] : new Date().toISOString().split("T")[0];
+      const chunkSnippet = chunk.replace(/\[[^\]]+ \([^\)]+\)\]:\s*/, "").slice(0, 150).trim();
+
+      let evtType = "document";
+      let evtTitle = `Email Update: ${cleanSubject.slice(0, 40)}`;
+      const cLow = chunk.toLowerCase();
+      if (cLow.includes("rfi") || cLow.includes("clarification")) {
+        evtType = "rfi";
+        evtTitle = "SIRIM Clarification Query (RFI)";
+      } else if (cLow.includes("sample")) {
+        evtType = "sample";
+        evtTitle = "Test Sample Request / Dispatch";
+      } else if (cLow.includes("payment") || cLow.includes("invoice")) {
+        evtType = "payment";
+        evtTitle = "Processing Fee Invoice Issued";
+      } else if (cLow.includes("approved") || cLow.includes("certificate")) {
+        evtType = "approval";
+        evtTitle = "Certificate of Conformity Approved";
+      }
+
+      timelineEvents.push({
+        date: parsedDate,
+        title: evtTitle,
+        description: chunkSnippet || `Communication recorded for ${applicationRef}.`,
+        sender: chunkSender,
+        emailSubject,
+        type: evtType,
+      });
+    });
+  }
+
+  if (timelineEvents.length === 0) {
+    timelineEvents.push({
+      date: date ? date.split("T")[0] : new Date().toISOString().split("T")[0],
+      title: `SIRIM Communication: ${cleanSubject.slice(0, 50)}`,
+      description: `Ingested email communication regarding ${applicationRef} (${status}).`,
+      sender: sender || "SIRIM QAS",
+      emailSubject,
+      type: status === "RFI_ACTION_REQUIRED" ? "rfi" : status === "SAMPLE_REQUESTED" ? "sample" : status === "PAYMENT_PENDING" ? "payment" : "status_change",
     });
   }
 
@@ -154,16 +224,16 @@ function fallbackHeuristicSirimParser(emailSubject: string, emailBody: string, s
     submissionDate: date ? date.split("T")[0] : new Date().toISOString().split("T")[0],
     lastActivityDate: new Date().toISOString().split("T")[0],
     targetDeadline: new Date(Date.now() + 7 * 86400000).toISOString().split("T")[0],
-    summary: `Communication ingested: ${cleanSubject}`,
+    certificateNo,
+    processingFeeRm,
+    paymentStatus: status === "PAYMENT_PENDING" ? "UNPAID" : processingFeeRm ? "PAID" : "NOT_APPLICABLE",
+    detectedStandards,
+    courierTracking,
+    quotationOrInvoiceNo,
+    summary: `Communication ingested: ${cleanSubject}${detectedStandards.length ? ` (${detectedStandards.join(', ')})` : ''}`,
     actionItems,
-    timelineEvent: {
-      date: date ? date.split("T")[0] : new Date().toISOString().split("T")[0],
-      title: `SIRIM Communication: ${cleanSubject.slice(0, 50)}`,
-      description: `Ingested email regarding ${applicationRef} (${status}).`,
-      sender: sender || "SIRIM QAS",
-      emailSubject,
-      type: status === "RFI_ACTION_REQUIRED" ? "rfi" : status === "SAMPLE_REQUESTED" ? "sample" : status === "PAYMENT_PENDING" ? "payment" : "status_change",
-    },
+    timelineEvent: timelineEvents[timelineEvents.length - 1],
+    timelineEvents,
   };
 }
 
@@ -199,9 +269,9 @@ async function startServer() {
       const ai = getGeminiClient();
 
       const prompt = `You are an expert Malaysian regulatory compliance specialist in SIRIM QAS International, e-ComM (MCMC), CIDB, and Certificate of Conformity (CoC) certification procedures.
-Analyze the following email communication related to a SIRIM certification application.
+Analyze the following email communication or full multi-stage email thread related to a SIRIM certification application. The thread may span several weeks, months, or up to 1 year of historical back-and-forth communication.
 
-Extract accurate, structured regulatory data.
+Extract comprehensive, accurate, structured regulatory data and reconstruct the complete chronological milestone progression of the application.
 
 EMAIL DETAILS:
 From: ${sender || "Unknown"}
@@ -221,16 +291,18 @@ Current Status: ${existingApplication.status}
 }
 
 OUTPUT RULES:
-1. Determine if this email is related to SIRIM QAS / e-ComM / MCMC / CIDB / CoC / Type Approval / Safety approval.
+1. Determine if this email/thread is related to SIRIM QAS / e-ComM / MCMC / CIDB / CoC / Type Approval / Safety approval.
 2. Extract the Application Reference No / Job No (e.g. SQAS/CMCS/2026/..., eComM Ref, etc.). If none found, generate a plausible reference based on the subject.
-3. Extract Product Name, Model Number, Brand, Applicant company name.
+3. Extract Product Name, Model Number, Brand, Applicant company name (e.g. Cytron Technologies Sdn Bhd).
 4. Identify Certification Scheme ('Type Approval (MCMC/SIRIM)', 'Special Approval', 'Modular Approval', 'CIDB Certification', 'Safety & EMC (MS Standards)').
-5. Identify current status from: 'SUBMITTED', 'UNDER_REVIEW', 'SAMPLE_REQUESTED', 'SAMPLE_SUBMITTED', 'TESTING_IN_PROGRESS', 'RFI_ACTION_REQUIRED', 'PAYMENT_PENDING', 'FINAL_EVALUATION', 'APPROVED', 'REJECTED', 'EXPIRED'.
-6. Extract officer name and email if mentioned.
-7. Extract critical action items (what needs to be done, who is responsible: APPLICANT or SIRIM or LAB, due date if specified or SLA deadline, action type: SUBMIT_DOC, PAY_FEE, SEND_SAMPLE, PROVIDE_CLARIFICATION, AWAIT_SIRIM, RENEW_CERTIFICATE, priority: CRITICAL, HIGH, MEDIUM, LOW).
-8. If certificate was issued, extract Certificate No and Expiry Date.
-9. If fees mentioned in RM (Ringgit Malaysia), extract processing fee and payment status.
-10. Formulate a clean timeline event title and concise description of what happened in this email.
+5. Identify current status based on the LATEST message in the thread: 'SUBMITTED', 'UNDER_REVIEW', 'SAMPLE_REQUESTED', 'SAMPLE_SUBMITTED', 'TESTING_IN_PROGRESS', 'RFI_ACTION_REQUIRED', 'PAYMENT_PENDING', 'FINAL_EVALUATION', 'APPROVED', 'REJECTED', 'EXPIRED'.
+6. Extract officer name and direct email if mentioned.
+7. Extract Malaysian standards tested against (e.g., MS IEC 62368-1, MCMC MTSFB TC T007, CISPR 32, etc.).
+8. Extract any courier tracking consignment numbers for test sample deliveries to SIRIM QAS (e.g. GDEX, PosLaju, DHL).
+9. Extract Quotation/Invoice number and processing fee in RM (Ringgit Malaysia).
+10. Extract Certificate Number and Expiry Date if approved.
+11. Extract critical active action items required by SIRIM or Lab.
+12. IMPORTANT: Extract ALL chronological timeline milestones across the entire thread history into 'timelineEvents' (e.g., initial submission, quotation issued, sample requested, RFI clarification sent, lab evaluation, approval). Also provide a single 'timelineEvent' for the latest update.
 
 Return ONLY a valid JSON object matching this schema.`;
 
@@ -288,6 +360,13 @@ Return ONLY a valid JSON object matching this schema.`;
                 type: Type.STRING,
                 enum: ["NOT_APPLICABLE", "UNPAID", "PAID"],
               },
+              detectedStandards: {
+                type: Type.ARRAY,
+                items: { type: Type.STRING },
+              },
+              courierTracking: { type: Type.STRING },
+              quotationOrInvoiceNo: { type: Type.STRING },
+              sirimJobNo: { type: Type.STRING },
               summary: { type: Type.STRING },
               actionItems: {
                 type: Type.ARRAY,
@@ -336,6 +415,25 @@ Return ONLY a valid JSON object matching this schema.`;
                   },
                 },
                 required: ["date", "title", "description", "sender", "type"],
+              },
+              timelineEvents: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    date: { type: Type.STRING },
+                    title: { type: Type.STRING },
+                    description: { type: Type.STRING },
+                    sender: { type: Type.STRING },
+                    emailSubject: { type: Type.STRING },
+                    emailSnippet: { type: Type.STRING },
+                    type: {
+                      type: Type.STRING,
+                      enum: ["status_change", "rfi", "document", "payment", "approval", "sample"],
+                    },
+                  },
+                  required: ["date", "title", "description", "sender", "type"],
+                },
               },
             },
             required: [
@@ -825,7 +923,7 @@ Return a JSON with "subject", "body", and "suggestedAttachments" (array of strin
   });
 
   // ----------------------------------------------------
-  // 5. Gmail: Search Relevant Threads
+  // 5. Gmail: Search Relevant Threads with Duration Filter
   // ----------------------------------------------------
   app.post("/api/gmail/search", async (req: Request, res: Response) => {
     try {
@@ -835,7 +933,29 @@ Return a JSON with "subject", "body", and "suggestedAttachments" (array of strin
       }
 
       const accessToken = authHeader.split(" ")[1];
-      const { query = 'SIRIM OR eComM OR "Certificate of Conformity" OR "Type Approval" OR "SIRIM QAS" OR "SQAS"', maxResults = 15 } = req.body;
+      const {
+        query: rawQuery = 'SIRIM OR eComM OR "Certificate of Conformity" OR "Type Approval" OR "SIRIM QAS" OR "SQAS"',
+        maxResults = 30,
+        daysBack: customDaysBack,
+        scope = "routine", // 'first_time' | 'routine' | 'custom'
+      } = req.body;
+
+      // Determine daysBack: default 365 for first_time, 30 for routine
+      const daysBack =
+        customDaysBack !== undefined && customDaysBack !== null && !isNaN(Number(customDaysBack))
+          ? Number(customDaysBack)
+          : scope === "first_time"
+          ? 365
+          : 30;
+
+      // Calculate cutoff date ISO
+      const cutoffDate = new Date(Date.now() - daysBack * 86400000).toISOString().split("T")[0];
+
+      // Build effective query with newer_than if not already specified
+      let effectiveQuery = String(rawQuery).trim();
+      if (!effectiveQuery.includes("newer_than:") && !effectiveQuery.includes("after:")) {
+        effectiveQuery = `(${effectiveQuery}) newer_than:${daysBack}d`;
+      }
 
       const oauth2Client = new google.auth.OAuth2();
       oauth2Client.setCredentials({ access_token: accessToken });
@@ -844,15 +964,16 @@ Return a JSON with "subject", "body", and "suggestedAttachments" (array of strin
 
       const searchRes = await gmail.users.threads.list({
         userId: "me",
-        q: query,
-        maxResults: Math.min(maxResults, 30),
+        q: effectiveQuery,
+        maxResults: Math.min(Math.max(Number(maxResults) || 20, 10), 50),
       });
 
       const threads = searchRes.data.threads || [];
       const threadSummaries = [];
 
-      // Fetch preview for each thread
-      for (const thread of threads.slice(0, 10)) {
+      // Fetch preview for threads (up to 25 items for thorough review)
+      const previewLimit = Math.min(threads.length, 25);
+      for (const thread of threads.slice(0, previewLimit)) {
         if (!thread.id) continue;
         try {
           const detailRes = await gmail.users.threads.get({
@@ -863,12 +984,15 @@ Return a JSON with "subject", "body", and "suggestedAttachments" (array of strin
           });
 
           const messages = detailRes.data.messages || [];
+          const firstMsg = messages[0] || {};
           const lastMsg = messages[messages.length - 1] || {};
-          const headers = lastMsg.payload?.headers || [];
+          const lastHeaders = lastMsg.payload?.headers || [];
+          const firstHeaders = firstMsg.payload?.headers || [];
 
-          const subject = headers.find((h) => h.name?.toLowerCase() === "subject")?.value || "(No Subject)";
-          const from = headers.find((h) => h.name?.toLowerCase() === "from")?.value || "Unknown";
-          const date = headers.find((h) => h.name?.toLowerCase() === "date")?.value || "";
+          const subject = lastHeaders.find((h) => h.name?.toLowerCase() === "subject")?.value || "(No Subject)";
+          const from = lastHeaders.find((h) => h.name?.toLowerCase() === "from")?.value || "Unknown";
+          const lastDate = lastHeaders.find((h) => h.name?.toLowerCase() === "date")?.value || "";
+          const firstDate = firstHeaders.find((h) => h.name?.toLowerCase() === "date")?.value || lastDate;
 
           threadSummaries.push({
             id: thread.id,
@@ -876,7 +1000,8 @@ Return a JSON with "subject", "body", and "suggestedAttachments" (array of strin
             messageCount: messages.length,
             subject,
             from,
-            date,
+            date: lastDate,
+            firstDate,
           });
         } catch (e) {
           console.warn(`Could not get metadata for thread ${thread.id}`, e);
@@ -885,7 +1010,11 @@ Return a JSON with "subject", "body", and "suggestedAttachments" (array of strin
 
       res.json({
         success: true,
-        query,
+        query: effectiveQuery,
+        rawQuery,
+        daysBack,
+        dateThreshold: cutoffDate,
+        scope,
         threads: threadSummaries,
         totalFound: threads.length,
       });
@@ -1000,15 +1129,7 @@ Return a JSON with "subject", "body", and "suggestedAttachments" (array of strin
   const APPS_FILE = path.join(DATA_DIR, "applications-store.json");
 
   function getStoredAutomationConfig() {
-    try {
-      if (fs.existsSync(CONFIG_FILE)) {
-        const raw = fs.readFileSync(CONFIG_FILE, "utf8");
-        return JSON.parse(raw);
-      }
-    } catch (err) {
-      console.warn("Could not read automation-config.json:", err);
-    }
-    return {
+    const defaults = {
       enabled: true,
       scheduleTime: "08:30",
       timezone: "Asia/Kuala_Lumpur",
@@ -1017,6 +1138,10 @@ Return a JSON with "subject", "body", and "suggestedAttachments" (array of strin
       autoSyncGoogleSheet: true,
       autoSendTelegram: true,
       alertOnCriticalOnly: false,
+      hasCompletedFirstScan: false,
+      firstScanDurationDays: 365,
+      routineScanDurationDays: 30,
+      scanScopeMode: "auto",
       telegram: {
         botToken: process.env.TELEGRAM_BOT_TOKEN || "",
         chatId: process.env.TELEGRAM_CHAT_ID || "",
@@ -1027,6 +1152,24 @@ Return a JSON with "subject", "body", and "suggestedAttachments" (array of strin
       },
       logs: [],
     };
+
+    try {
+      if (fs.existsSync(CONFIG_FILE)) {
+        const raw = fs.readFileSync(CONFIG_FILE, "utf8");
+        const parsed = JSON.parse(raw);
+        return {
+          ...defaults,
+          ...parsed,
+          telegram: {
+            ...defaults.telegram,
+            ...(parsed.telegram || {}),
+          },
+        };
+      }
+    } catch (err) {
+      console.warn("Could not read automation-config.json:", err);
+    }
+    return defaults;
   }
 
   function saveStoredAutomationConfig(config: any) {
@@ -1429,33 +1572,56 @@ Return a JSON with "subject", "body", and "suggestedAttachments" (array of strin
       const autoSyncSheet = options.autoSyncSheet !== undefined ? options.autoSyncSheet : (directAutoSync !== undefined ? directAutoSync : true);
       const autoSendTelegram = options.autoSendTelegram !== undefined ? options.autoSendTelegram : (directAutoTelegram !== undefined ? directAutoTelegram : true);
 
+      // Load stored automation config to check first-time vs routine policy
+      const storedConfig = getStoredAutomationConfig();
+      const isFirstScan = options.isFirstScan !== undefined
+        ? Boolean(options.isFirstScan)
+        : !storedConfig.hasCompletedFirstScan;
+
+      // Scan duration in days: 365 days (1 whole year) for first-time scan, 30 days (1 month) for routine scan
+      const scanDays = options.scanDays
+        ? Number(options.scanDays)
+        : isFirstScan
+        ? (storedConfig.firstScanDurationDays || 365)
+        : (storedConfig.routineScanDurationDays || 30);
+
       let currentApplications = [...applications];
       let newEmailsDetected = 0;
       const authHeader = req.headers.authorization;
       const accessToken = authHeader && authHeader.startsWith("Bearer ") ? authHeader.split(" ")[1] : null;
 
-      addLog("SYSTEM", "INFO", "Started automated SIRIM morning synchronization cycle.");
+      addLog("SYSTEM", "INFO", `Started automated SIRIM morning synchronization cycle (${isFirstScan ? "First-Time Historical Mode" : "Routine Scan Mode"}).`);
 
       // STEP 1: Scan Gmail if access token provided & autoScan enabled
       if (autoScanGmail && accessToken) {
-        addLog("SCAN", "INFO", "Scanning Gmail inbox for new SIRIM QAS and e-ComM correspondence...");
+        if (isFirstScan) {
+          addLog("SCAN", "INFO", `[First-Time Scan] Scanning 1 whole year (${scanDays} days) of SIRIM QAS & e-ComM email archives (newer_than:${scanDays}d)...`);
+        } else {
+          addLog("SCAN", "INFO", `[Routine Scan] Scanning past 1 month (${scanDays} days) of active SIRIM updates & RFIs (newer_than:${scanDays}d)...`);
+        }
+
         try {
           const oauth2Client = new google.auth.OAuth2();
           oauth2Client.setCredentials({ access_token: accessToken });
           const gmail = google.gmail({ version: "v1", auth: oauth2Client });
 
-          // Search recent SIRIM threads (last 2 days)
+          // Construct query respecting first-time (365d) vs routine (30d) duration
+          const queryBase = 'from:sirim.my OR subject:sirim OR subject:ecomm OR subject:sqas OR subject:"Type Approval" OR subject:"Certificate of Conformity" OR "Certificate of Conformity"';
+          const scanQuery = options.scanQuery || `(${queryBase}) newer_than:${scanDays}d`;
+          const maxThreadSearch = isFirstScan ? 35 : 15;
+
           const searchRes = await gmail.users.threads.list({
             userId: "me",
-            q: 'from:sirim.my OR subject:sirim OR subject:ecomm OR subject:sqas OR subject:"Type Approval" OR subject:"Certificate of Conformity" newer_than:2d',
-            maxResults: 10,
+            q: scanQuery,
+            maxResults: maxThreadSearch,
           });
 
           const foundThreads = searchRes.data.threads || [];
-          addLog("SCAN", "SUCCESS", `Found ${foundThreads.length} recent matching email threads in Gmail.`);
+          addLog("SCAN", "SUCCESS", `Found ${foundThreads.length} email threads in Gmail within past ${scanDays} days.`);
 
-          // Process and ingest any new threads
-          for (const thread of foundThreads.slice(0, 5)) {
+          // Process threads (up to 15 for first-time scan to build deep history, up to 8 for routine)
+          const processLimit = isFirstScan ? Math.min(foundThreads.length, 15) : Math.min(foundThreads.length, 8);
+          for (const thread of foundThreads.slice(0, processLimit)) {
             if (!thread.id) continue;
             try {
               const threadRes = await gmail.users.threads.get({
@@ -1465,29 +1631,53 @@ Return a JSON with "subject", "body", and "suggestedAttachments" (array of strin
               });
 
               const messages = threadRes.data.messages || [];
+              if (messages.length === 0) continue;
+
               const lastMsg = messages[messages.length - 1];
+              const firstMsg = messages[0];
               if (!lastMsg) continue;
 
-              const headers = lastMsg.payload?.headers || [];
-              const subject = headers.find((h) => h.name?.toLowerCase() === "subject")?.value || "";
-              const from = headers.find((h) => h.name?.toLowerCase() === "from")?.value || "";
-              const date = headers.find((h) => h.name?.toLowerCase() === "date")?.value || "";
+              const lastHeaders = lastMsg.payload?.headers || [];
+              const subject = lastHeaders.find((h) => h.name?.toLowerCase() === "subject")?.value || "";
+              const from = lastHeaders.find((h) => h.name?.toLowerCase() === "from")?.value || "";
+              const lastDate = lastHeaders.find((h) => h.name?.toLowerCase() === "date")?.value || "";
+              const firstHeaders = firstMsg.payload?.headers || [];
+              const firstDate = firstHeaders.find((h) => h.name?.toLowerCase() === "date")?.value || lastDate;
 
-              let bodyText = lastMsg.snippet || "";
-              if (lastMsg.payload?.parts) {
-                for (const part of lastMsg.payload.parts) {
-                  if (part.mimeType === "text/plain" && part.body?.data) {
-                    bodyText = Buffer.from(part.body.data, "base64").toString("utf-8");
-                    break;
+              // Extract text across all messages in chronological sequence to understand full application progression
+              const threadTranscript = messages.map((m: any, mIdx: number) => {
+                const mHeaders = m.payload?.headers || [];
+                const mFrom = mHeaders.find((h: any) => h.name?.toLowerCase() === "from")?.value || "Unknown";
+                const mDate = mHeaders.find((h: any) => h.name?.toLowerCase() === "date")?.value || "";
+                let text = m.snippet || "";
+                if (m.payload?.parts) {
+                  for (const part of m.payload.parts) {
+                    if (part.mimeType === "text/plain" && part.body?.data) {
+                      text = Buffer.from(part.body.data, "base64").toString("utf-8");
+                      break;
+                    }
                   }
                 }
-              }
+                return `[Message ${mIdx + 1} | From: ${mFrom} | Date: ${mDate}]\n${text.slice(0, 1500)}`;
+              }).join("\n\n---\n\n");
 
-              // Parse with AI parser / fallback
+              // Determine if this thread matches an existing application
+              const existingIdx = currentApplications.findIndex(
+                (a) => a.threadId === thread.id || (a.applicationRef && subject.toLowerCase().includes(a.applicationRef.toLowerCase()))
+              );
+              const existingApp = existingIdx >= 0 ? currentApplications[existingIdx] : null;
+
+              // Parse with AI parser / fallback heuristic parser
               let parsed: any = null;
               try {
                 const ai = getGeminiClient();
-                const prompt = `Extract SIRIM CoC regulatory information from this email:\nSubject: ${subject}\nFrom: ${from}\nBody: ${bodyText.slice(0, 2000)}`;
+                const prompt = `Analyze this multi-stage Malaysian SIRIM certification email thread (${messages.length} messages, dating from ${firstDate} to ${lastDate}):
+Subject: ${subject}
+Existing Status: ${existingApp?.status || "None"}
+
+Thread Transcript:
+${threadTranscript.slice(0, 5000)}`;
+
                 const aiRes = await generateContentWithRetryAndFallback(
                   ai,
                   "gemini-3.7-flash",
@@ -1499,39 +1689,118 @@ Return a JSON with "subject", "body", and "suggestedAttachments" (array of strin
                 );
                 parsed = JSON.parse(aiRes.text?.trim() || "{}");
               } catch (parseErr) {
-                parsed = fallbackHeuristicSirimParser(subject, bodyText, from, date);
+                parsed = fallbackHeuristicSirimParser(subject, threadTranscript, from, lastDate);
               }
 
               if (parsed && parsed.isSirimRelated !== false) {
                 newEmailsDetected++;
-                const existingIdx = currentApplications.findIndex(
-                  (a) => (a.applicationRef && parsed.applicationRef && a.applicationRef.toLowerCase() === parsed.applicationRef.toLowerCase()) || a.threadId === thread.id
-                );
 
-                const newEmailMsg = {
-                  id: lastMsg.id || `msg-${Date.now()}`,
-                  messageId: lastMsg.id || "",
-                  from,
-                  to: "applicant@cytron.io",
-                  date: date || new Date().toISOString(),
-                  subject,
-                  snippet: lastMsg.snippet || "",
-                  bodyText,
-                };
+                // Map email messages for thread storage
+                const newEmailMessages = messages.map((m: any) => {
+                  const mHeaders = m.payload?.headers || [];
+                  const mSub = mHeaders.find((h: any) => h.name?.toLowerCase() === "subject")?.value || subject;
+                  const mFrom = mHeaders.find((h: any) => h.name?.toLowerCase() === "from")?.value || from;
+                  const mDate = mHeaders.find((h: any) => h.name?.toLowerCase() === "date")?.value || lastDate;
+                  let bodyText = m.snippet || "";
+                  if (m.payload?.parts) {
+                    for (const part of m.payload.parts) {
+                      if (part.mimeType === "text/plain" && part.body?.data) {
+                        bodyText = Buffer.from(part.body.data, "base64").toString("utf-8");
+                        break;
+                      }
+                    }
+                  }
+                  return {
+                    id: m.id || `msg-${Date.now()}-${Math.random()}`,
+                    messageId: m.id || "",
+                    from: mFrom,
+                    to: "applicant@cytron.io",
+                    date: mDate,
+                    subject: mSub,
+                    snippet: m.snippet || "",
+                    bodyText,
+                  };
+                });
+
+                // Prepare timeline events
+                const extractedTimeline = (parsed.timelineEvents && parsed.timelineEvents.length > 0)
+                  ? parsed.timelineEvents.map((t: any, idx: number) => ({
+                      id: `tl-ext-${thread.id}-${idx}`,
+                      date: t.date || lastDate?.split("T")[0] || new Date().toISOString().split("T")[0],
+                      title: t.title || "SIRIM Communication Update",
+                      description: t.description || "",
+                      sender: t.sender || from,
+                      emailSubject: subject,
+                      type: t.type || "status_change",
+                    }))
+                  : [
+                      {
+                        id: `tl-auto-${Date.now()}-${thread.id}`,
+                        date: lastDate ? lastDate.split("T")[0] : new Date().toISOString().split("T")[0],
+                        title: `SIRIM Update: ${subject.slice(0, 45)}`,
+                        description: parsed.summary || `Parsed ${messages.length} message(s) in thread.`,
+                        sender: from,
+                        emailSubject: subject,
+                        type: parsed.status === "RFI_ACTION_REQUIRED" ? "rfi" : parsed.status === "APPROVED" ? "approval" : "status_change",
+                      },
+                    ];
 
                 if (existingIdx >= 0) {
                   const existing = currentApplications[existingIdx];
-                  const threadsList = [...(existing.emailThreads || [])];
-                  if (!threadsList.some((m) => m.id === newEmailMsg.id)) {
-                    threadsList.push(newEmailMsg);
+                  const existingThreads = existing.emailThreads || [];
+                  const mergedThreads = [...existingThreads];
+                  for (const nMsg of newEmailMessages) {
+                    if (!mergedThreads.some((m) => m.id === nMsg.id || m.messageId === nMsg.messageId)) {
+                      mergedThreads.push(nMsg);
+                    }
                   }
+
+                  // Merge timeline events without duplicates
+                  const existingTimeline = existing.timeline || [];
+                  const mergedTimeline = [...existingTimeline];
+                  for (const extEvt of extractedTimeline) {
+                    if (!mergedTimeline.some((t) => t.title === extEvt.title && t.date === extEvt.date)) {
+                      mergedTimeline.push(extEvt);
+                    }
+                  }
+                  mergedTimeline.sort((a, b) => (a.date < b.date ? -1 : 1));
+
+                  // Merge action items without duplicates
+                  const existingActions = existing.actionItems || [];
+                  const mergedActions = [...existingActions];
+                  if (Array.isArray(parsed.actionItems)) {
+                    parsed.actionItems.forEach((act: any, actIdx: number) => {
+                      if (!mergedActions.some((a) => a.title.toLowerCase() === act.title.toLowerCase())) {
+                        mergedActions.push({
+                          id: `act-auto-${Date.now()}-${actIdx}`,
+                          title: act.title,
+                          description: act.description || "",
+                          assignedTo: act.assignedTo || "APPLICANT",
+                          dueDate: act.dueDate || new Date(Date.now() + 7 * 86400000).toISOString().split("T")[0],
+                          isCompleted: false,
+                          priority: act.priority || "HIGH",
+                          requiredActionType: act.requiredActionType || "PROVIDE_CLARIFICATION",
+                        });
+                      }
+                    });
+                  }
+
                   currentApplications[existingIdx] = {
                     ...existing,
                     status: parsed.status || existing.status,
                     officerName: parsed.officerName || existing.officerName,
+                    officerEmail: parsed.officerEmail || existing.officerEmail,
                     emailSubject: subject,
-                    lastActivityDate: new Date().toISOString().split("T")[0],
-                    emailThreads: threadsList,
+                    lastActivityDate: lastDate ? lastDate.split("T")[0] : new Date().toISOString().split("T")[0],
+                    certificateNo: parsed.certificateNo || existing.certificateNo,
+                    certificateExpiryDate: parsed.certificateExpiryDate || existing.certificateExpiryDate,
+                    processingFeeRm: parsed.processingFeeRm || existing.processingFeeRm,
+                    paymentStatus: parsed.paymentStatus || existing.paymentStatus,
+                    standards: parsed.detectedStandards?.length ? parsed.detectedStandards : existing.standards,
+                    courierTracking: parsed.courierTracking || existing.courierTracking,
+                    timeline: mergedTimeline,
+                    actionItems: mergedActions,
+                    emailThreads: mergedThreads,
                   };
                 } else {
                   currentApplications.unshift({
@@ -1546,11 +1815,18 @@ Return a JSON with "subject", "body", and "suggestedAttachments" (array of strin
                     status: parsed.status || "UNDER_REVIEW",
                     officerName: parsed.officerName || "SIRIM Evaluator",
                     officerEmail: parsed.officerEmail || from,
-                    submissionDate: parsed.submissionDate || new Date().toISOString().split("T")[0],
-                    lastActivityDate: new Date().toISOString().split("T")[0],
+                    submissionDate: parsed.submissionDate || firstDate?.split("T")[0] || new Date().toISOString().split("T")[0],
+                    lastActivityDate: lastDate ? lastDate.split("T")[0] : new Date().toISOString().split("T")[0],
                     targetDeadline: parsed.targetDeadline || new Date(Date.now() + 7 * 86400000).toISOString().split("T")[0],
                     emailSubject: subject,
                     gmailThreadLink: `https://mail.google.com/mail/u/0/#all/${thread.id}`,
+                    certificateNo: parsed.certificateNo || undefined,
+                    certificateExpiryDate: parsed.certificateExpiryDate || undefined,
+                    processingFeeRm: parsed.processingFeeRm || undefined,
+                    paymentStatus: parsed.paymentStatus || "NOT_APPLICABLE",
+                    standards: parsed.detectedStandards || [],
+                    courierTracking: parsed.courierTracking || undefined,
+                    notes: parsed.summary || undefined,
                     actionItems: (parsed.actionItems || []).map((act: any, i: number) => ({
                       id: `act-auto-${Date.now()}-${i}`,
                       title: act.title,
@@ -1561,17 +1837,8 @@ Return a JSON with "subject", "body", and "suggestedAttachments" (array of strin
                       priority: act.priority || "HIGH",
                       requiredActionType: act.requiredActionType || "PROVIDE_CLARIFICATION",
                     })),
-                    timeline: [
-                      {
-                        id: `tl-auto-${Date.now()}`,
-                        date: new Date().toISOString().split("T")[0],
-                        title: `Automated Morning Ingestion: ${subject.slice(0, 40)}`,
-                        description: `Automatically ingested via daily background scanner.`,
-                        sender: from,
-                        type: "status_change",
-                      },
-                    ],
-                    emailThreads: [newEmailMsg],
+                    timeline: extractedTimeline,
+                    emailThreads: newEmailMessages,
                     syncedToSheet: false,
                   });
                 }
@@ -1580,6 +1847,12 @@ Return a JSON with "subject", "body", and "suggestedAttachments" (array of strin
               console.warn("Could not process thread during auto-scan", threadProcErr);
             }
           }
+
+          // Mark first scan as completed in stored config
+          storedConfig.hasCompletedFirstScan = true;
+          storedConfig.firstScanCompletedAt = new Date().toISOString();
+          saveStoredAutomationConfig(storedConfig);
+          addLog("SCAN", "SUCCESS", `Email scan completed (${isFirstScan ? "1-Year Historical Ingestion" : "1-Month Routine Update"}). Registered first scan completion.`);
         } catch (scanErr: any) {
           addLog("SCAN", "WARNING", `Gmail auto-scan skipped or failed: ${scanErr?.message || scanErr}`);
         }
@@ -1714,11 +1987,15 @@ Return a JSON with "subject", "body", and "suggestedAttachments" (array of strin
 
       res.json({
         success: true,
-        summary: `Cycle finished: ${newEmailsDetected} new emails detected, ${sheetSyncSuccess ? "Sheet updated" : "Sheet skipped"}, ${telegramSent ? "Telegram sent" : "Telegram skipped"}.`,
+        summary: `Cycle finished (${isFirstScan ? "1-Year Historical Ingestion" : "1-Month Routine Scan"}): ${newEmailsDetected} new emails detected, ${sheetSyncSuccess ? "Sheet updated" : "Sheet skipped"}, ${telegramSent ? "Telegram sent" : "Telegram skipped"}.`,
         applications: currentApplications,
         updatedApplications: currentApplications,
         sheetSyncResult: { success: sheetSyncSuccess },
         scanResult: { threadsFound: newEmailsDetected },
+        isFirstScan,
+        scanDays,
+        hasCompletedFirstScan: true,
+        firstScanCompletedAt: storedConfig.firstScanCompletedAt,
         newEmailsDetected,
         sheetSyncSuccess,
         telegramSent,
@@ -1732,6 +2009,25 @@ Return a JSON with "subject", "body", and "suggestedAttachments" (array of strin
         details: err?.message || String(err),
         logs,
       });
+    }
+  });
+
+  // ----------------------------------------------------
+  // Reset First-Time Scan Flag (Re-run 1-Year Historical Scan)
+  // ----------------------------------------------------
+  app.post("/api/automation/reset-first-scan", (req: Request, res: Response) => {
+    try {
+      const config = getStoredAutomationConfig();
+      config.hasCompletedFirstScan = false;
+      delete config.firstScanCompletedAt;
+      saveStoredAutomationConfig(config);
+      res.json({
+        success: true,
+        message: "First-scan flag reset. Next automated or manual scan will scan 1 whole year (365 days) of email archives.",
+        config,
+      });
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to reset first scan flag", details: e?.message });
     }
   });
 

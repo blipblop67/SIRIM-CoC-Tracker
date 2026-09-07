@@ -21,6 +21,8 @@ import {
   Sparkles,
   Info,
   Calendar,
+  History,
+  RotateCcw,
 } from 'lucide-react';
 import {
   AutomationConfig,
@@ -69,6 +71,7 @@ export const AutomationModal: React.FC<AutomationModalProps> = ({
   // Form saved notification state
   const [isSaved, setIsSaved] = useState(false);
   const [isSendingBriefing, setIsSendingBriefing] = useState(false);
+  const [isResettingFirstScan, setIsResettingFirstScan] = useState(false);
 
   // Synchronize localConfig when external config prop updates
   useEffect(() => {
@@ -76,6 +79,24 @@ export const AutomationModal: React.FC<AutomationModalProps> = ({
   }, [config]);
 
   if (!isOpen) return null;
+
+  const handleResetFirstScan = async () => {
+    setIsResettingFirstScan(true);
+    try {
+      const res = await fetch('/api/automation/reset-first-scan', { method: 'POST' });
+      const data = await res.json();
+      if (data.success && data.config) {
+        handleUpdate({
+          hasCompletedFirstScan: false,
+          firstScanCompletedAt: undefined,
+        });
+      }
+    } catch (e) {
+      console.error('Failed to reset first scan:', e);
+    } finally {
+      setIsResettingFirstScan(false);
+    }
+  };
 
   const handleUpdate = (updates: Partial<AutomationConfig>) => {
     const updated = { ...localConfig, ...updates };
@@ -370,29 +391,125 @@ export const AutomationModal: React.FC<AutomationModalProps> = ({
                 </h3>
                 <div className="space-y-3">
                   {/* Step 1: Gmail Scanner */}
-                  <div className="p-3.5 rounded-xl border border-slate-200 hover:border-slate-300 transition-colors flex items-center justify-between">
-                    <div className="flex items-center gap-3">
-                      <div className="w-8 h-8 rounded-lg bg-sky-100 text-sky-700 flex items-center justify-center font-bold text-xs">
-                        1
-                      </div>
-                      <div>
-                        <div className="flex items-center gap-2">
-                          <Mail className="w-4 h-4 text-sky-600" />
-                          <span className="text-sm font-semibold text-slate-800">
-                            Auto-Scan Gmail Inbox & AI Parse
-                          </span>
+                  <div className="rounded-xl border border-slate-200 overflow-hidden">
+                    <div className="p-3.5 hover:border-slate-300 transition-colors flex items-center justify-between bg-white">
+                      <div className="flex items-center gap-3">
+                        <div className="w-8 h-8 rounded-lg bg-sky-100 text-sky-700 flex items-center justify-center font-bold text-xs">
+                          1
                         </div>
-                        <p className="text-xs text-slate-500 mt-0.5">
-                          Scans recent emails for SIRIM status updates, RFIs, test sample call notices, and invoices.
-                        </p>
+                        <div>
+                          <div className="flex items-center gap-2">
+                            <Mail className="w-4 h-4 text-sky-600" />
+                            <span className="text-sm font-semibold text-slate-800">
+                              Auto-Scan Gmail Inbox & AI Parse
+                            </span>
+                          </div>
+                          <p className="text-xs text-slate-500 mt-0.5">
+                            Scans emails for SIRIM status updates, RFIs, test sample call notices, and invoices.
+                          </p>
+                        </div>
                       </div>
+                      <input
+                        type="checkbox"
+                        checked={localConfig.autoScanGmail}
+                        onChange={(e) => handleUpdate({ autoScanGmail: e.target.checked })}
+                        className="w-4 h-4 text-indigo-600 rounded border-slate-300 focus:ring-indigo-500"
+                      />
                     </div>
-                    <input
-                      type="checkbox"
-                      checked={localConfig.autoScanGmail}
-                      onChange={(e) => handleUpdate({ autoScanGmail: e.target.checked })}
-                      className="w-4 h-4 text-indigo-600 rounded border-slate-300 focus:ring-indigo-500"
-                    />
+
+                    {/* Differentiated Scan Duration Policy (1 Year First-Time vs 1 Month Routine) */}
+                    {localConfig.autoScanGmail && (
+                      <div className="px-4 py-3 bg-sky-50/50 border-t border-slate-200 space-y-3">
+                        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                          <div className="flex items-center gap-2">
+                            <History className="w-4 h-4 text-sky-600" />
+                            <span className="text-xs font-bold text-slate-800">
+                              Email Ingestion Duration Strategy
+                            </span>
+                          </div>
+
+                          {localConfig.hasCompletedFirstScan ? (
+                            <div className="flex items-center gap-2">
+                              <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-emerald-700 bg-emerald-100 px-2 py-0.5 rounded-full">
+                                <CheckCircle2 className="w-3 h-3" />
+                                Routine Mode Active (1 Month)
+                              </span>
+                              <button
+                                type="button"
+                                onClick={handleResetFirstScan}
+                                disabled={isResettingFirstScan}
+                                className="inline-flex items-center gap-1 text-[10px] font-bold text-slate-600 hover:text-sky-700 hover:bg-sky-100 px-2 py-0.5 rounded border border-slate-300 bg-white transition-colors"
+                                title="Reset first scan status so next run scans 1 whole year"
+                              >
+                                <RotateCcw className={`w-3 h-3 ${isResettingFirstScan ? 'animate-spin' : ''}`} />
+                                Re-run 1-Year Scan
+                              </button>
+                            </div>
+                          ) : (
+                            <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-amber-800 bg-amber-100 px-2 py-0.5 rounded-full">
+                              <Sparkles className="w-3 h-3 text-amber-600" />
+                              Pending 1st Scan: Next run will scan 1 Whole Year (365d)
+                            </span>
+                          )}
+                        </div>
+
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+                          <div className="p-3 bg-white rounded-lg border border-slate-200 space-y-1">
+                            <div className="flex items-center justify-between">
+                              <span className="font-bold text-slate-800">First-Time Scan Duration</span>
+                              <span className="text-[11px] text-sky-700 font-bold">
+                                {localConfig.firstScanDurationDays || 365} Days (1 Year)
+                              </span>
+                            </div>
+                            <p className="text-[11px] text-slate-500">
+                              Builds complete historical registry of CoC certificates, ongoing testing jobs, and prior RFIs.
+                            </p>
+                            <div className="pt-1.5 flex items-center gap-2">
+                              <label className="text-[11px] text-slate-600">Scan duration (days):</label>
+                              <input
+                                type="number"
+                                min={30}
+                                max={1095}
+                                value={localConfig.firstScanDurationDays || 365}
+                                onChange={(e) =>
+                                  handleUpdate({
+                                    firstScanDurationDays: parseInt(e.target.value, 10) || 365,
+                                  })
+                                }
+                                className="w-20 px-2 py-1 text-xs border border-slate-300 rounded font-semibold text-slate-800"
+                              />
+                            </div>
+                          </div>
+
+                          <div className="p-3 bg-white rounded-lg border border-slate-200 space-y-1">
+                            <div className="flex items-center justify-between">
+                              <span className="font-bold text-slate-800">Routine Daily Scan Duration</span>
+                              <span className="text-[11px] text-emerald-700 font-bold">
+                                {localConfig.routineScanDurationDays || 30} Days (1 Month)
+                              </span>
+                            </div>
+                            <p className="text-[11px] text-slate-500">
+                              Focuses solely on recent officer clarifications, pending RFIs, sample arrivals, and fee invoices.
+                            </p>
+                            <div className="pt-1.5 flex items-center gap-2">
+                              <label className="text-[11px] text-slate-600">Scan duration (days):</label>
+                              <input
+                                type="number"
+                                min={1}
+                                max={365}
+                                value={localConfig.routineScanDurationDays || 30}
+                                onChange={(e) =>
+                                  handleUpdate({
+                                    routineScanDurationDays: parseInt(e.target.value, 10) || 30,
+                                  })
+                                }
+                                className="w-20 px-2 py-1 text-xs border border-slate-300 rounded font-semibold text-slate-800"
+                              />
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    )}
                   </div>
 
                   {/* Step 2: Master Sheet Sync */}

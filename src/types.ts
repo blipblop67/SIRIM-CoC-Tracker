@@ -86,6 +86,8 @@ export interface SirimApplication {
   certificateExpiryDate?: string;
   processingFeeRm?: number;
   paymentStatus?: 'NOT_APPLICABLE' | 'UNPAID' | 'PAID';
+  standards?: string[];
+  courierTracking?: string;
   actionItems: ActionItem[];
   timeline: TimelineEvent[];
   emailThreads: EmailMessage[];
@@ -107,11 +109,14 @@ export interface SheetSyncConfig {
   rowsCount?: number;
 }
 
+export type ScanDurationPreset = '1y' | '6m' | '3m' | '1m' | 'custom';
+
 export interface ScanFilter {
   query: string;
   maxResults: number;
   includeRead: boolean;
   daysBack: number;
+  preset?: ScanDurationPreset;
 }
 
 export interface UserAuthSession {
@@ -159,7 +164,12 @@ export interface ParsedEmailResult {
   paymentStatus?: 'NOT_APPLICABLE' | 'UNPAID' | 'PAID';
   summary: string;
   actionItems: Omit<ActionItem, 'id' | 'isCompleted'>[];
-  timelineEvent: Omit<TimelineEvent, 'id'>;
+  timelineEvent?: Omit<TimelineEvent, 'id'>;
+  timelineEvents?: Omit<TimelineEvent, 'id'>[];
+  detectedStandards?: string[];
+  sirimJobNo?: string;
+  quotationOrInvoiceNo?: string;
+  courierTracking?: string;
 }
 
 export interface TelegramConfig {
@@ -195,5 +205,11 @@ export interface AutomationConfig {
   lastRunStatus?: 'SUCCESS' | 'WARNING' | 'ERROR' | 'IDLE';
   lastRunSummary?: string;
   logs: AutomationLogEntry[];
+  // Scan Duration Policies
+  hasCompletedFirstScan?: boolean;
+  firstScanCompletedAt?: string;
+  firstScanDurationDays?: number; // default 365 days (1 whole year)
+  routineScanDurationDays?: number; // default 30 days (1 month)
+  scanScopeMode?: 'auto' | 'first_time_1y' | 'routine_1m' | 'custom';
 }
 

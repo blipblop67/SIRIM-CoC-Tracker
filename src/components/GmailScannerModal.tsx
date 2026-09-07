@@ -12,9 +12,12 @@ import {
   ArrowRight,
   User,
   Radio,
+  Calendar,
+  History,
+  Check,
 } from 'lucide-react';
 import confetti from 'canvas-confetti';
-import { UserAuthSession, SirimApplication, ActionItem, TimelineEvent } from '../types';
+import { UserAuthSession, SirimApplication, ActionItem, TimelineEvent, ScanDurationPreset } from '../types';
 import { notificationAudio } from '../utils/audio';
 
 interface GmailScannerModalProps {
@@ -46,12 +49,29 @@ export const GmailScannerModal: React.FC<GmailScannerModalProps> = ({
   const [query, setQuery] = useState(
     'SIRIM OR eComM OR "Certificate of Conformity" OR "Type Approval" OR "SIRIM QAS" OR "SQAS"'
   );
+  const [durationPreset, setDurationPreset] = useState<ScanDurationPreset>('1y');
+  const [customDays, setCustomDays] = useState<number>(365);
   const [isScanning, setIsScanning] = useState(false);
   const [threads, setThreads] = useState<ThreadSummary[]>([]);
   const [selectedThreadIds, setSelectedThreadIds] = useState<Set<string>>(new Set());
   const [isProcessingAi, setIsProcessingAi] = useState(false);
   const [processingProgress, setProcessingProgress] = useState<string>('');
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+
+  const getEffectiveDays = (preset: ScanDurationPreset): number => {
+    switch (preset) {
+      case '1y':
+        return 365;
+      case '6m':
+        return 180;
+      case '3m':
+        return 90;
+      case '1m':
+        return 30;
+      case 'custom':
+        return Math.max(1, customDays || 30);
+    }
+  };
 
   const presets = [
     { label: 'All SIRIM & e-ComM', q: 'SIRIM OR eComM OR "Certificate of Conformity" OR "Type Approval"' },
@@ -61,8 +81,11 @@ export const GmailScannerModal: React.FC<GmailScannerModalProps> = ({
     { label: 'Approved CoC Certificates', q: 'SIRIM ("Approved" OR "Issuance of Certificate" OR "CoA" OR "CoC")' },
   ];
 
-  const handleScan = async (searchQ?: string) => {
+  const handleScan = async (searchQ?: string, presetOverride?: ScanDurationPreset) => {
     const activeQuery = searchQ || query;
+    const activePreset = presetOverride || durationPreset;
+    const effectiveDays = getEffectiveDays(activePreset);
+
     if (!authSession?.accessToken) {
       setErrorMsg('Please sign in with your Google Account to scan Gmail.');
       return;
@@ -82,7 +105,9 @@ export const GmailScannerModal: React.FC<GmailScannerModalProps> = ({
         },
         body: JSON.stringify({
           query: activeQuery,
-          maxResults: 20,
+          maxResults: effectiveDays > 60 ? 35 : 20,
+          daysBack: effectiveDays,
+          scope: activePreset === '1y' ? 'first_time' : activePreset === '1m' ? 'routine' : 'custom',
         }),
       });
 
@@ -92,13 +117,13 @@ export const GmailScannerModal: React.FC<GmailScannerModalProps> = ({
       }
 
       setThreads(data.threads || []);
-      // Auto select first 3 by default
+      // Auto select first 4 by default
       const initialSelected = new Set<string>();
-      (data.threads || []).slice(0, 3).forEach((t: ThreadSummary) => initialSelected.add(t.id));
+      (data.threads || []).slice(0, 4).forEach((t: ThreadSummary) => initialSelected.add(t.id));
       setSelectedThreadIds(initialSelected);
 
       if ((data.threads || []).length === 0) {
-        setErrorMsg('No matching SIRIM or e-ComM email threads found with this search query.');
+        setErrorMsg(`No matching SIRIM or e-ComM email threads found within the past ${effectiveDays} days.`);
       }
     } catch (err: any) {
       console.error(err);
@@ -129,7 +154,7 @@ export const GmailScannerModal: React.FC<GmailScannerModalProps> = ({
     for (const rawThreadId of idsArray) {
       const threadId = String(rawThreadId);
       count++;
-      setProcessingProgress(`Analyzing thread ${count} of ${idsArray.length} with Gemini AI...`);
+      setProcessingProgress(`Analyzing multi-stage thread ${count} of ${idsArray.length} with Gemini AI...`);
 
       try {
         // Fetch full thread
@@ -147,6 +172,7 @@ export const GmailScannerModal: React.FC<GmailScannerModalProps> = ({
 
         const messages = threadData.messages;
         const lastMessage = messages[messages.length - 1] || {};
+        const firstMessage = messages[0] || lastMessage;
 
         // Parse with Gemini
         const parseRes = await fetch('/api/gemini/parse-email-thread', {
@@ -154,7 +180,7 @@ export const GmailScannerModal: React.FC<GmailScannerModalProps> = ({
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             emailSubject: lastMessage.subject || '',
-            emailBody: messages.map((m: any) => `[${m.from} (${m.date})]:\n${m.bodyText || m.snippet}`).join('\n\n---\n\n'),
+            emailBody: messages.map((m: any, idx: number) => `[Message ${idx + 1} - From: ${m.from} | Date: ${m.date} | Subject: ${m.subject}]:\n${m.bodyText || m.snippet}`).join('\n\n---\n\n'),
             sender: lastMessage.from || '',
             date: lastMessage.date || '',
           }),
@@ -176,17 +202,31 @@ export const GmailScannerModal: React.FC<GmailScannerModalProps> = ({
             emailSourceSnippet: a.emailSourceSnippet || undefined,
           }));
 
-          const timeline: TimelineEvent[] = [
-            {
-              id: `tl-${threadId}-${Date.now()}-1`,
-              date: aiResult.timelineEvent?.date || new Date().toISOString().split('T')[0],
-              title: aiResult.timelineEvent?.title || 'Communication Ingested from Gmail',
-              description: aiResult.timelineEvent?.description || aiResult.summary || 'Email thread imported.',
-              sender: aiResult.timelineEvent?.sender || lastMessage.from || 'SIRIM QAS',
+          // Reconstruct multi-event timeline if provided by Gemini, or fallback to single event
+          let timeline: TimelineEvent[] = [];
+          if (Array.isArray(aiResult.timelineEvents) && aiResult.timelineEvents.length > 0) {
+            timeline = aiResult.timelineEvents.map((te: any, idx: number) => ({
+              id: `tl-${threadId}-${idx}-${Date.now()}`,
+              date: te.date || lastMessage.date?.split('T')[0] || new Date().toISOString().split('T')[0],
+              title: te.title || 'SIRIM Milestone',
+              description: te.description || '',
+              sender: te.sender || lastMessage.from || 'SIRIM QAS',
               emailSubject: lastMessage.subject,
-              type: aiResult.timelineEvent?.type || 'rfi',
-            },
-          ];
+              type: te.type || 'status_change',
+            }));
+          } else {
+            timeline = [
+              {
+                id: `tl-${threadId}-${Date.now()}-1`,
+                date: aiResult.timelineEvent?.date || lastMessage.date?.split('T')[0] || new Date().toISOString().split('T')[0],
+                title: aiResult.timelineEvent?.title || 'Communication Ingested from Gmail',
+                description: aiResult.timelineEvent?.description || aiResult.summary || 'Email thread imported.',
+                sender: aiResult.timelineEvent?.sender || lastMessage.from || 'SIRIM QAS',
+                emailSubject: lastMessage.subject,
+                type: aiResult.timelineEvent?.type || 'rfi',
+              },
+            ];
+          }
 
           const newApp: SirimApplication = {
             id: `sirim-${threadId}`,
@@ -200,13 +240,15 @@ export const GmailScannerModal: React.FC<GmailScannerModalProps> = ({
             status: aiResult.status || 'UNDER_REVIEW',
             officerName: aiResult.officerName || undefined,
             officerEmail: aiResult.officerEmail || undefined,
-            submissionDate: aiResult.submissionDate || new Date().toISOString().split('T')[0],
-            lastActivityDate: new Date().toISOString().split('T')[0],
+            submissionDate: aiResult.submissionDate || firstMessage.date?.split('T')[0] || new Date().toISOString().split('T')[0],
+            lastActivityDate: lastMessage.date?.split('T')[0] || new Date().toISOString().split('T')[0],
             targetDeadline: aiResult.targetDeadline || undefined,
             certificateNo: aiResult.certificateNo || undefined,
             certificateExpiryDate: aiResult.certificateExpiryDate || undefined,
             processingFeeRm: aiResult.processingFeeRm || undefined,
             paymentStatus: aiResult.paymentStatus || 'NOT_APPLICABLE',
+            standards: aiResult.detectedStandards || [],
+            courierTracking: aiResult.courierTracking || undefined,
             notes: aiResult.summary || '',
             emailSubject: lastMessage.subject || `SIRIM / e-ComM Correspondence (${aiResult.applicationRef || 'Update'})`,
             gmailThreadLink: `https://mail.google.com/mail/u/0/#all/${threadId}`,
@@ -234,6 +276,13 @@ export const GmailScannerModal: React.FC<GmailScannerModalProps> = ({
 
     setIsProcessingAi(false);
   };
+
+  const activeDays = getEffectiveDays(durationPreset);
+  const cutoffDate = new Date(Date.now() - activeDays * 86400000).toLocaleDateString('en-MY', {
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+  });
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-slate-950/70 backdrop-blur-xs overflow-y-auto">
@@ -284,6 +333,104 @@ export const GmailScannerModal: React.FC<GmailScannerModalProps> = ({
             </div>
           )}
 
+          {/* DURATION SELECTOR (1 Year vs 1 Month vs Custom) */}
+          <div className="bg-white border border-slate-200 rounded-xl p-3.5 space-y-2.5 shadow-xs">
+            <div className="flex items-center justify-between">
+              <label className="text-xs font-bold text-slate-800 flex items-center gap-1.5">
+                <History className="w-3.5 h-3.5 text-sky-600" />
+                Email Ingestion Scope & Duration
+              </label>
+              <span className="text-[11px] font-medium text-slate-500">
+                Since {cutoffDate} ({activeDays} days)
+              </span>
+            </div>
+
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+              <button
+                type="button"
+                onClick={() => setDurationPreset('1y')}
+                className={`p-2.5 rounded-lg border text-left transition-all ${
+                  durationPreset === '1y'
+                    ? 'border-sky-600 bg-sky-50/80 ring-1 ring-sky-500/50'
+                    : 'border-slate-200 bg-white hover:border-slate-300'
+                }`}
+              >
+                <div className="flex items-center justify-between mb-0.5">
+                  <span className="text-xs font-bold text-slate-900">1 Year (365d)</span>
+                  {durationPreset === '1y' && <Check className="w-3 h-3 text-sky-600" />}
+                </div>
+                <p className="text-[10px] text-sky-700 font-semibold">First-Time Scan</p>
+                <p className="text-[10px] text-slate-400">All historical certs</p>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setDurationPreset('1m')}
+                className={`p-2.5 rounded-lg border text-left transition-all ${
+                  durationPreset === '1m'
+                    ? 'border-sky-600 bg-sky-50/80 ring-1 ring-sky-500/50'
+                    : 'border-slate-200 bg-white hover:border-slate-300'
+                }`}
+              >
+                <div className="flex items-center justify-between mb-0.5">
+                  <span className="text-xs font-bold text-slate-900">1 Month (30d)</span>
+                  {durationPreset === '1m' && <Check className="w-3 h-3 text-sky-600" />}
+                </div>
+                <p className="text-[10px] text-emerald-700 font-semibold">Routine Scan</p>
+                <p className="text-[10px] text-slate-400">Active updates & RFIs</p>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setDurationPreset('3m')}
+                className={`p-2.5 rounded-lg border text-left transition-all ${
+                  durationPreset === '3m'
+                    ? 'border-sky-600 bg-sky-50/80 ring-1 ring-sky-500/50'
+                    : 'border-slate-200 bg-white hover:border-slate-300'
+                }`}
+              >
+                <div className="flex items-center justify-between mb-0.5">
+                  <span className="text-xs font-bold text-slate-900">3 Months (90d)</span>
+                  {durationPreset === '3m' && <Check className="w-3 h-3 text-sky-600" />}
+                </div>
+                <p className="text-[10px] text-slate-600 font-semibold">Quarterly Review</p>
+                <p className="text-[10px] text-slate-400">Past quarter jobs</p>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setDurationPreset('custom')}
+                className={`p-2.5 rounded-lg border text-left transition-all ${
+                  durationPreset === 'custom'
+                    ? 'border-sky-600 bg-sky-50/80 ring-1 ring-sky-500/50'
+                    : 'border-slate-200 bg-white hover:border-slate-300'
+                }`}
+              >
+                <div className="flex items-center justify-between mb-0.5">
+                  <span className="text-xs font-bold text-slate-900">Custom Days</span>
+                  {durationPreset === 'custom' && <Check className="w-3 h-3 text-sky-600" />}
+                </div>
+                <p className="text-[10px] text-slate-600 font-semibold">Manual Input</p>
+                <p className="text-[10px] text-slate-400">Set exact days</p>
+              </button>
+            </div>
+
+            {durationPreset === 'custom' && (
+              <div className="pt-2 flex items-center gap-2">
+                <span className="text-xs text-slate-600 font-medium">Scan emails from past</span>
+                <input
+                  type="number"
+                  min={1}
+                  max={1095}
+                  value={customDays}
+                  onChange={(e) => setCustomDays(parseInt(e.target.value, 10) || 30)}
+                  className="w-24 px-2 py-1 text-xs border border-slate-300 rounded-md font-semibold text-slate-800"
+                />
+                <span className="text-xs text-slate-600">days (e.g. 180 for 6 months, 730 for 2 years)</span>
+              </div>
+            )}
+          </div>
+
           {/* Query Bar */}
           <div className="bg-white border border-slate-200 rounded-xl p-3.5 space-y-2.5 shadow-xs">
             <label className="text-xs font-bold text-slate-700 block">
@@ -306,7 +453,7 @@ export const GmailScannerModal: React.FC<GmailScannerModalProps> = ({
                 className="flex items-center gap-1.5 px-4 py-2 text-xs font-bold text-white bg-sky-600 hover:bg-sky-500 rounded-lg shadow-sm transition-all disabled:opacity-50"
               >
                 <RefreshCw className={`w-3.5 h-3.5 ${isScanning ? 'animate-spin' : ''}`} />
-                <span>{isScanning ? 'Scanning...' : 'Scan Inbox'}</span>
+                <span>{isScanning ? 'Scanning...' : `Scan (${activeDays}d)`}</span>
               </button>
             </div>
 
@@ -331,10 +478,10 @@ export const GmailScannerModal: React.FC<GmailScannerModalProps> = ({
           {threads.length > 0 && (
             <div className="space-y-2">
               <div className="flex items-center justify-between text-xs text-slate-600 px-1">
-                <span className="font-bold">
-                  Found {threads.length} Relevant Threads
+                <span className="font-bold text-slate-800">
+                  Found {threads.length} Relevant Threads (Past {activeDays} Days)
                 </span>
-                <span>
+                <span className="text-sky-700 font-medium">
                   {selectedThreadIds.size} selected for AI analysis
                 </span>
               </div>
@@ -367,6 +514,7 @@ export const GmailScannerModal: React.FC<GmailScannerModalProps> = ({
                             {new Date(thread.date).toLocaleDateString('en-MY', {
                               day: '2-digit',
                               month: 'short',
+                              year: 'numeric',
                             })}
                           </span>
                         </div>
@@ -388,7 +536,7 @@ export const GmailScannerModal: React.FC<GmailScannerModalProps> = ({
               <Sparkles className="w-6 h-6 text-sky-600 animate-spin mx-auto" />
               <p className="text-xs font-bold text-sky-900">{processingProgress}</p>
               <p className="text-[11px] text-sky-700">
-                Extracting Reference Numbers, Action Items, Officers, and Due Dates...
+                Extracting Reference Numbers, Action Items, Officers, Courier Details, and Milestones...
               </p>
             </div>
           )}
@@ -427,3 +575,4 @@ export const GmailScannerModal: React.FC<GmailScannerModalProps> = ({
     </div>
   );
 };
+
