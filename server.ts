@@ -1,5 +1,6 @@
 import express, { Request, Response } from "express";
 import path from "path";
+import fs from "fs";
 import { GoogleGenAI, Type } from "@google/genai";
 import { google } from "googleapis";
 import dotenv from "dotenv";
@@ -976,6 +977,88 @@ Return a JSON with "subject", "body", and "suggestedAttachments" (array of strin
   });
 
   // ----------------------------------------------------
+  // HTML escaping helper for Telegram Bot API
+  // ----------------------------------------------------
+  function escapeHtml(str: any): string {
+    if (str === null || str === undefined) return "";
+    return String(str)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;");
+  }
+
+  // ----------------------------------------------------
+  // Server-side Automation & Application Storage Helpers
+  // ----------------------------------------------------
+  const DATA_DIR = path.join(process.cwd(), "data");
+  if (!fs.existsSync(DATA_DIR)) {
+    try {
+      fs.mkdirSync(DATA_DIR, { recursive: true });
+    } catch (e) {}
+  }
+  const CONFIG_FILE = path.join(DATA_DIR, "automation-config.json");
+  const APPS_FILE = path.join(DATA_DIR, "applications-store.json");
+
+  function getStoredAutomationConfig() {
+    try {
+      if (fs.existsSync(CONFIG_FILE)) {
+        const raw = fs.readFileSync(CONFIG_FILE, "utf8");
+        return JSON.parse(raw);
+      }
+    } catch (err) {
+      console.warn("Could not read automation-config.json:", err);
+    }
+    return {
+      enabled: true,
+      scheduleTime: "08:30",
+      timezone: "Asia/Kuala_Lumpur",
+      intervalHours: 24,
+      autoScanGmail: true,
+      autoSyncGoogleSheet: true,
+      autoSendTelegram: true,
+      alertOnCriticalOnly: false,
+      telegram: {
+        botToken: process.env.TELEGRAM_BOT_TOKEN || "",
+        chatId: process.env.TELEGRAM_CHAT_ID || "",
+        topicId: process.env.TELEGRAM_TOPIC_ID || "",
+        enabled: true,
+        dailyDigest: true,
+        instantAlertOnCritical: true,
+      },
+      logs: [],
+    };
+  }
+
+  function saveStoredAutomationConfig(config: any) {
+    try {
+      fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2), "utf8");
+    } catch (err) {
+      console.error("Could not write automation-config.json:", err);
+    }
+  }
+
+  function getStoredApplications(): any[] {
+    try {
+      if (fs.existsSync(APPS_FILE)) {
+        const raw = fs.readFileSync(APPS_FILE, "utf8");
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) return parsed;
+      }
+    } catch (err) {
+      console.warn("Could not read applications-store.json:", err);
+    }
+    return [];
+  }
+
+  function saveStoredApplications(apps: any[]) {
+    try {
+      fs.writeFileSync(APPS_FILE, JSON.stringify(apps, null, 2), "utf8");
+    } catch (err) {
+      console.error("Could not write applications-store.json:", err);
+    }
+  }
+
+  // ----------------------------------------------------
   // 7. Telegram Bot: Raw Message Sender Helper
   // ----------------------------------------------------
   async function sendTelegramRawMessage(
@@ -1028,6 +1111,26 @@ Return a JSON with "subject", "body", and "suggestedAttachments" (array of strin
 
     const resJson: any = await response.json();
     if (!response.ok || !resJson.ok) {
+      // Fallback: If failed due to HTML parse error, strip HTML tags and retry as plain text
+      const desc = resJson.description || "";
+      if (payload.parse_mode && (desc.toLowerCase().includes("parse") || desc.toLowerCase().includes("entity"))) {
+        console.warn("Telegram HTML parse error, retrying with plain text fallback:", desc);
+        const plainText = text.replace(/<[^>]*>/g, "");
+        const fallbackPayload = {
+          ...payload,
+          parse_mode: undefined,
+          text: plainText,
+        };
+        const fallbackResponse = await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(fallbackPayload),
+        });
+        const fallbackJson: any = await fallbackResponse.json();
+        if (fallbackResponse.ok && fallbackJson.ok) {
+          return fallbackJson;
+        }
+      }
       throw new Error(resJson.description || `Telegram API error (${response.status})`);
     }
 
@@ -1057,7 +1160,8 @@ Return a JSON with "subject", "body", and "suggestedAttachments" (array of strin
     const approvedApps = applications.filter((a) => a.status === "APPROVED");
 
     const headerEmoji = options.isUrgentAlert ? "🚨" : "🌅";
-    const headerTitle = options.title || (options.isUrgentAlert ? "SIRIM CoC Urgent Action Alert" : "SIRIM CoC Daily Morning Briefing");
+    const rawHeaderTitle = options.title || (options.isUrgentAlert ? "SIRIM CoC Urgent Action Alert" : "SIRIM CoC Daily Morning Briefing");
+    const headerTitle = escapeHtml(rawHeaderTitle);
 
     let msg = `${headerEmoji} <b>${headerTitle}</b>\n`;
     msg += `🏢 <i>Cytron Technologies • Regulatory Compliance Register</i>\n`;
@@ -1086,8 +1190,9 @@ Return a JSON with "subject", "body", and "suggestedAttachments" (array of strin
       msg += `🚨 <b>Action Items & Target Deadlines:</b>\n`;
       urgentQueue.forEach((app, idx) => {
         const pending = (app.actionItems || []).find((act: any) => !act.isCompleted);
-        const actionText = pending ? pending.title : (app.notes || app.status);
-        const officer = app.officerName ? ` (Officer: ${app.officerName})` : "";
+        const rawActionText = pending ? pending.title : (app.notes || app.status);
+        const actionText = escapeHtml(rawActionText);
+        const officer = app.officerName ? ` (Officer: ${escapeHtml(app.officerName)})` : "";
 
         let statusBadge = "⚠️ RFI Required";
         if (app.status === "SAMPLE_REQUESTED") statusBadge = "📦 Sample Requested";
@@ -1097,10 +1202,14 @@ Return a JSON with "subject", "body", and "suggestedAttachments" (array of strin
         const query = app.applicationRef || app.modelNumber || "SIRIM";
         const gmailLink = app.gmailThreadLink || `https://mail.google.com/mail/u/0/#search/${encodeURIComponent(query)}`;
 
-        msg += `<b>${idx + 1}. [${app.applicationRef || "Ref N/A"}]</b> ${app.productName || "Equipment"} (<code>${app.modelNumber || "Model N/A"}</code>)\n`;
+        const refText = escapeHtml(app.applicationRef || "Ref N/A");
+        const prodText = escapeHtml(app.productName || "Equipment");
+        const modelText = escapeHtml(app.modelNumber || "Model N/A");
+
+        msg += `<b>${idx + 1}. [${refText}]</b> ${prodText} (<code>${modelText}</code>)\n`;
         msg += `   • Status: <b>${statusBadge}</b>${officer}\n`;
         if (app.targetDeadline) {
-          msg += `   • SLA Deadline: <b>${app.targetDeadline}</b>\n`;
+          msg += `   • SLA Deadline: <b>${escapeHtml(app.targetDeadline)}</b>\n`;
         }
         msg += `   • Action: ${actionText}\n`;
         msg += `   • <a href="${gmailLink}">✉️ Open Gmail Thread</a>\n\n`;
@@ -1119,11 +1228,68 @@ Return a JSON with "subject", "body", and "suggestedAttachments" (array of strin
   }
 
   // ----------------------------------------------------
+  // Automation Config Endpoints (Persistent Server Storage)
+  // ----------------------------------------------------
+  app.get("/api/automation/config", (req: Request, res: Response) => {
+    const config = getStoredAutomationConfig();
+    // Fill in environment variable fallbacks if config is missing values
+    if (!config.telegram) {
+      config.telegram = {};
+    }
+    if (!config.telegram.botToken && process.env.TELEGRAM_BOT_TOKEN) {
+      config.telegram.botToken = process.env.TELEGRAM_BOT_TOKEN;
+    }
+    if (!config.telegram.chatId && process.env.TELEGRAM_CHAT_ID) {
+      config.telegram.chatId = process.env.TELEGRAM_CHAT_ID;
+    }
+    if (!config.telegram.topicId && process.env.TELEGRAM_TOPIC_ID) {
+      config.telegram.topicId = process.env.TELEGRAM_TOPIC_ID;
+    }
+    res.json(config);
+  });
+
+  app.post("/api/automation/config", (req: Request, res: Response) => {
+    try {
+      const incoming = req.body;
+      const current = getStoredAutomationConfig();
+      const updated = {
+        ...current,
+        ...incoming,
+        telegram: {
+          ...(current.telegram || {}),
+          ...(incoming.telegram || {}),
+        },
+      };
+      saveStoredAutomationConfig(updated);
+      res.json({ success: true, config: updated });
+    } catch (err: any) {
+      res.status(500).json({ error: "Failed to save configuration", details: err?.message });
+    }
+  });
+
+  app.post("/api/automation/sync-apps", (req: Request, res: Response) => {
+    try {
+      const { applications } = req.body;
+      if (Array.isArray(applications)) {
+        saveStoredApplications(applications);
+        res.json({ success: true, count: applications.length });
+      } else {
+        res.status(400).json({ error: "Invalid applications array" });
+      }
+    } catch (err: any) {
+      res.status(500).json({ error: "Failed to save applications", details: err?.message });
+    }
+  });
+
+  // ----------------------------------------------------
   // 9. Telegram API: Test Connection Endpoint
   // ----------------------------------------------------
   app.post("/api/telegram/test", async (req: Request, res: Response) => {
     try {
       const { botToken, chatId, topicId } = req.body;
+      const token = (botToken || process.env.TELEGRAM_BOT_TOKEN || "").trim();
+      const chat = (chatId || process.env.TELEGRAM_CHAT_ID || "").trim();
+
       const testMessage = `✅ <b>SIRIM CoC Tracker — Telegram Connection Verified!</b>\n\n` +
         `Your Telegram bot is successfully connected and configured to receive:\n` +
         `• 🌅 Daily Morning Status Digests & Summaries\n` +
@@ -1132,7 +1298,7 @@ Return a JSON with "subject", "body", and "suggestedAttachments" (array of strin
         `• 📊 Auto-updated Google Sheet direct links\n\n` +
         `<i>Time: ${new Date().toLocaleTimeString("en-GB", { timeZone: "Asia/Kuala_Lumpur" })} MYT</i>`;
 
-      const tgResult = await sendTelegramRawMessage(botToken, chatId, testMessage, { topicId });
+      const tgResult = await sendTelegramRawMessage(token, chat, testMessage, { topicId });
       res.json({ success: true, result: tgResult });
     } catch (err: any) {
       console.error("Error in telegram/test:", err);
@@ -1149,6 +1315,8 @@ Return a JSON with "subject", "body", and "suggestedAttachments" (array of strin
   app.post("/api/telegram/send", async (req: Request, res: Response) => {
     try {
       const { botToken, chatId, topicId, message, applications, sheetUrl, title, isUrgentAlert } = req.body;
+      const token = (botToken || process.env.TELEGRAM_BOT_TOKEN || "").trim();
+      const chat = (chatId || process.env.TELEGRAM_CHAT_ID || "").trim();
 
       let textToSend = message;
       if (!textToSend && Array.isArray(applications)) {
@@ -1163,7 +1331,7 @@ Return a JSON with "subject", "body", and "suggestedAttachments" (array of strin
         return res.status(400).json({ error: "Either message text or applications array is required" });
       }
 
-      const tgResult = await sendTelegramRawMessage(botToken, chatId, textToSend, { topicId });
+      const tgResult = await sendTelegramRawMessage(token, chat, textToSend, { topicId });
       res.json({ success: true, result: tgResult });
     } catch (err: any) {
       console.error("Error in telegram/send:", err);
@@ -1171,6 +1339,54 @@ Return a JSON with "subject", "body", and "suggestedAttachments" (array of strin
         error: "Failed to send Telegram message",
         details: err?.message || String(err),
       });
+    }
+  });
+
+  // ----------------------------------------------------
+  // 11. Telegram API: Instant Critical Alert Endpoint
+  // ----------------------------------------------------
+  app.post("/api/telegram/alert", async (req: Request, res: Response) => {
+    try {
+      const { botToken, chatId, topicId, application, message } = req.body;
+      const tgBotToken = (botToken || process.env.TELEGRAM_BOT_TOKEN || "").trim();
+      const tgChatId = (chatId || process.env.TELEGRAM_CHAT_ID || "").trim();
+
+      if (!tgBotToken || !tgChatId) {
+        return res.status(400).json({ error: "Telegram Bot Token and Chat ID are required." });
+      }
+
+      let text = message;
+      if (!text && application) {
+        const query = application.applicationRef || application.modelNumber || "SIRIM";
+        const gmailLink = application.gmailThreadLink || `https://mail.google.com/mail/u/0/#search/${encodeURIComponent(query)}`;
+        const pending = (application.actionItems || []).find((act: any) => !act.isCompleted);
+        const rawActionText = pending ? pending.title : (application.notes || "Immediate review required");
+
+        let statusBadge = "⚠️ RFI Required";
+        if (application.status === "SAMPLE_REQUESTED") statusBadge = "📦 Sample Requested";
+        else if (application.status === "PAYMENT_PENDING") statusBadge = "💳 Payment Due";
+        else if (application.status === "TESTING_IN_PROGRESS") statusBadge = "🔬 Testing in Progress";
+
+        text = `🚨 <b>SIRIM CoC URGENT ACTION ALERT</b>\n` +
+          `🏢 <i>Cytron Technologies • Regulatory Compliance Register</i>\n\n` +
+          `📁 <b>Application Ref:</b> <code>${escapeHtml(application.applicationRef || "Ref Pending")}</code>\n` +
+          `📦 <b>Product:</b> <b>${escapeHtml(application.productName || "Equipment")}</b> (<code>${escapeHtml(application.modelNumber || "Model N/A")}</code>)\n` +
+          `⚠️ <b>Current Status:</b> <b>${statusBadge}</b>\n` +
+          (application.targetDeadline ? `⏰ <b>Target SLA Deadline:</b> <b>${escapeHtml(application.targetDeadline)}</b>\n` : "") +
+          (application.officerName ? `👤 <b>Assigned Officer:</b> ${escapeHtml(application.officerName)}\n` : "") +
+          `\n⚡ <b>Required Next Action:</b>\n${escapeHtml(rawActionText)}\n\n` +
+          `✉️ <a href="${gmailLink}">Open Inbound Gmail Correspondence ↗</a>`;
+      }
+
+      if (!text) {
+        return res.status(400).json({ error: "Either message or application is required" });
+      }
+
+      const tgResult = await sendTelegramRawMessage(tgBotToken, tgChatId, text, { topicId });
+      res.json({ success: true, result: tgResult });
+    } catch (err: any) {
+      console.error("Error in telegram/alert:", err);
+      res.status(400).json({ error: "Failed to send Telegram alert", details: err?.message || String(err) });
     }
   });
 
@@ -1537,6 +1753,92 @@ Return a JSON with "subject", "body", and "suggestedAttachments" (array of strin
       res.sendFile(path.join(distPath, "index.html"));
     });
   }
+
+  // ----------------------------------------------------
+  // Background Autonomous Scheduler Engine (Server-side)
+  // Runs 24/7 on local Node server or Cloud Run, checking every 60s
+  // ----------------------------------------------------
+  setInterval(async () => {
+    try {
+      const config = getStoredAutomationConfig();
+      if (!config || !config.enabled) return;
+
+      const tgBotToken = (config.telegram?.botToken || process.env.TELEGRAM_BOT_TOKEN || "").trim();
+      const tgChatId = (config.telegram?.chatId || process.env.TELEGRAM_CHAT_ID || "").trim();
+
+      if (!config.autoSendTelegram || !tgBotToken || !tgChatId) return;
+
+      const now = new Date();
+      // Date in Asia/Kuala_Lumpur (YYYY-MM-DD)
+      const mytDate = new Intl.DateTimeFormat("en-CA", {
+        timeZone: "Asia/Kuala_Lumpur",
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+      }).format(now);
+
+      // Time in Asia/Kuala_Lumpur (HH:MM)
+      const mytTime = new Intl.DateTimeFormat("en-GB", {
+        timeZone: "Asia/Kuala_Lumpur",
+        hour: "2-digit",
+        minute: "2-digit",
+        hour12: false,
+      }).format(now);
+
+      const targetTime = config.scheduleTime || "08:30";
+
+      // Check last run date
+      let lastRunDate = null;
+      if (config.lastRunAt) {
+        try {
+          lastRunDate = new Intl.DateTimeFormat("en-CA", {
+            timeZone: "Asia/Kuala_Lumpur",
+            year: "numeric",
+            month: "2-digit",
+            day: "2-digit",
+          }).format(new Date(config.lastRunAt));
+        } catch (e) {}
+      }
+
+      // If already ran today in MYT, do not duplicate
+      if (lastRunDate === mytDate) {
+        return;
+      }
+
+      // If reached or passed target scheduled time today
+      if (mytTime >= targetTime) {
+        console.log(`[Autonomous Scheduler] Triggering morning Telegram briefing for ${mytDate} at ${mytTime} MYT (Scheduled: ${targetTime})`);
+        
+        const apps = getStoredApplications();
+        const briefingText = formatTelegramBriefing(apps, {
+          title: "SIRIM CoC Daily Morning Briefing",
+        });
+
+        await sendTelegramRawMessage(tgBotToken, tgChatId, briefingText, {
+          topicId: config.telegram?.topicId,
+        });
+
+        config.lastRunAt = new Date().toISOString();
+        config.lastRunStatus = "SUCCESS";
+        config.lastRunSummary = `Autonomous morning digest delivered to Telegram (${apps.length} active apps, ${mytDate} at ${mytTime} MYT).`;
+        
+        if (!Array.isArray(config.logs)) config.logs = [];
+        config.logs.unshift({
+          id: `log-${Date.now()}`,
+          timestamp: new Date().toISOString(),
+          type: "TELEGRAM",
+          status: "SUCCESS",
+          message: `Autonomous morning briefing delivered to Telegram Chat (${tgChatId}).`,
+        });
+        if (config.logs.length > 50) config.logs = config.logs.slice(0, 50);
+
+        saveStoredAutomationConfig(config);
+        console.log(`[Autonomous Scheduler] Telegram morning briefing delivered successfully.`);
+      }
+    } catch (schedErr: any) {
+      console.error("[Autonomous Scheduler] Error during automation tick:", schedErr?.message || schedErr);
+    }
+  }, 60000);
 
   app.listen(PORT, "0.0.0.0", () => {
     console.log(`SIRIM CoC Progress Tracker Server running on port ${PORT}`);

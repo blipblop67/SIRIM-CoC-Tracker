@@ -93,6 +93,8 @@ export const AutomationModal: React.FC<AutomationModalProps> = ({
     setTimeout(() => setIsSaved(false), 2000);
   };
 
+  const [isSendingBriefing, setIsSendingBriefing] = useState(false);
+
   // Test Telegram Connection
   const handleTestTelegram = async () => {
     setIsTestingTelegram(true);
@@ -139,6 +141,58 @@ export const AutomationModal: React.FC<AutomationModalProps> = ({
       });
     } finally {
       setIsTestingTelegram(false);
+    }
+  };
+
+  // Send Full Real Morning Briefing to Telegram right now
+  const handleSendTelegramBriefingNow = async () => {
+    setIsSendingBriefing(true);
+    setTelegramTestResult(null);
+
+    try {
+      const res = await fetch('/api/telegram/send', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          botToken: localConfig.telegram.botToken,
+          chatId: localConfig.telegram.chatId,
+          topicId: localConfig.telegram.topicId,
+          applications: applications,
+          sheetUrl: sheetConfig?.spreadsheetUrl,
+          title: 'SIRIM CoC Daily Morning Briefing',
+        }),
+      });
+
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        throw new Error(data.details || data.error || 'Failed to dispatch Telegram briefing');
+      }
+
+      setTelegramTestResult({
+        success: true,
+        message: `Morning briefing (${applications.length} applications) delivered to Telegram chat successfully! Check your Telegram app.`,
+      });
+
+      onAddLog({
+        timestamp: new Date().toISOString(),
+        type: 'TELEGRAM',
+        status: 'SUCCESS',
+        message: `Manual Telegram briefing dispatched (${applications.length} applications).`,
+      });
+    } catch (err: any) {
+      setTelegramTestResult({
+        success: false,
+        message: err.message || 'Error sending briefing to Telegram. Check bot token and chat permissions.',
+      });
+
+      onAddLog({
+        timestamp: new Date().toISOString(),
+        type: 'TELEGRAM',
+        status: 'ERROR',
+        message: `Telegram briefing failed: ${err.message}`,
+      });
+    } finally {
+      setIsSendingBriefing(false);
     }
   };
 
@@ -466,23 +520,54 @@ export const AutomationModal: React.FC<AutomationModalProps> = ({
                   </div>
                 </div>
 
-                <button
-                  onClick={handleTestTelegram}
-                  disabled={isTestingTelegram || !isTelegramConfigured}
-                  className="bg-white border border-slate-200 hover:border-slate-300 text-slate-800 hover:text-indigo-600 px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 shadow-xs transition-colors disabled:opacity-40"
-                >
-                  {isTestingTelegram ? (
-                    <>
-                      <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                      Testing...
-                    </>
-                  ) : (
-                    <>
-                      <Send className="w-3.5 h-3.5 text-indigo-500" />
-                      Send Test Ping
-                    </>
-                  )}
-                </button>
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    onClick={handleTestTelegram}
+                    disabled={isTestingTelegram || !isTelegramConfigured}
+                    className="bg-white border border-slate-200 hover:border-slate-300 text-slate-800 hover:text-indigo-600 px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 shadow-xs transition-colors disabled:opacity-40"
+                    title="Send a quick test message to verify the bot can reach your chat"
+                  >
+                    {isTestingTelegram ? (
+                      <>
+                        <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                        Testing...
+                      </>
+                    ) : (
+                      <>
+                        <Send className="w-3.5 h-3.5 text-indigo-500" />
+                        Send Test Ping
+                      </>
+                    )}
+                  </button>
+
+                  <button
+                    onClick={handleSendTelegramBriefingNow}
+                    disabled={isSendingBriefing || !isTelegramConfigured}
+                    className="bg-indigo-600 hover:bg-indigo-500 text-white px-3.5 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 shadow-xs transition-colors disabled:opacity-40"
+                    title="Send the full formatted morning briefing with your active applications right now"
+                  >
+                    {isSendingBriefing ? (
+                      <>
+                        <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                        Sending Briefing...
+                      </>
+                    ) : (
+                      <>
+                        <Sparkles className="w-3.5 h-3.5 text-amber-300" />
+                        Send Full Briefing Now
+                      </>
+                    )}
+                  </button>
+                </div>
+              </div>
+
+              {/* 24/7 Background Scheduler Indicator */}
+              <div className="p-3 bg-indigo-50/70 border border-indigo-100 rounded-xl flex items-start gap-2.5">
+                <Clock className="w-4 h-4 text-indigo-600 shrink-0 mt-0.5" />
+                <div className="text-xs text-indigo-950">
+                  <span className="font-semibold text-indigo-900">24/7 Autonomous Background Scheduler: </span>
+                  When running on your local machine or server, the backend engine automatically dispatches your Telegram morning briefing at <strong>{localConfig.scheduleTime} MYT</strong> every day, even when this browser tab is closed.
+                </div>
               </div>
 
               {telegramTestResult && (

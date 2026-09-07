@@ -236,10 +236,39 @@ export default function App() {
   const [isRunningAutomation, setIsRunningAutomation] = useState(false);
   const [syncFeedback, setSyncFeedback] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
 
-  // Save applications to localStorage whenever they change
+  // Initial load: Fetch server config if available to merge environment or server settings
+  useEffect(() => {
+    fetch('/api/automation/config')
+      .then((res) => (res.ok ? res.json() : null))
+      .then((serverConfig) => {
+        if (serverConfig) {
+          setAutomationConfig((prev) => ({
+            ...prev,
+            ...serverConfig,
+            telegram: {
+              ...prev.telegram,
+              ...(serverConfig.telegram || {}),
+              botToken: prev.telegram?.botToken || serverConfig.telegram?.botToken || '',
+              chatId: prev.telegram?.chatId || serverConfig.telegram?.chatId || '',
+              topicId: prev.telegram?.topicId || serverConfig.telegram?.topicId || '',
+            },
+          }));
+        }
+      })
+      .catch(() => {});
+  }, []);
+
+  // Save applications to localStorage and sync to server whenever they change
   useEffect(() => {
     try {
       localStorage.setItem(APPS_STORAGE_KEY, JSON.stringify(applications));
+      if (applications.length > 0) {
+        fetch('/api/automation/sync-apps', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ applications }),
+        }).catch(() => {});
+      }
     } catch (e) {
       console.error('Failed to save applications', e);
     }
@@ -253,12 +282,18 @@ export default function App() {
     } catch (e) {}
   };
 
-  // Save automationConfig to localStorage
+  // Save automationConfig to localStorage and sync to server
   const handleSaveAutomationConfig = (newConfig: AutomationConfig) => {
     setAutomationConfig(newConfig);
     try {
       localStorage.setItem(AUTOMATION_CONFIG_KEY, JSON.stringify(newConfig));
     } catch (e) {}
+
+    fetch('/api/automation/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(newConfig),
+    }).catch(() => {});
   };
 
   const handleAddAutomationLog = (entry: Omit<AutomationLogEntry, 'id'>) => {
@@ -271,6 +306,35 @@ export default function App() {
       ...automationConfig,
       logs: updatedLogs,
     });
+  };
+
+  // Instant Critical Alert via Telegram
+  const sendInstantTelegramAlert = async (app: SirimApplication) => {
+    if (!automationConfig.telegram?.enabled || !automationConfig.telegram?.instantAlertOnCritical) {
+      return;
+    }
+    const token = automationConfig.telegram?.botToken;
+    const chat = automationConfig.telegram?.chatId;
+    try {
+      await fetch('/api/telegram/alert', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          botToken: token,
+          chatId: chat,
+          topicId: automationConfig.telegram?.topicId,
+          application: app,
+        }),
+      });
+      handleAddAutomationLog({
+        timestamp: new Date().toISOString(),
+        type: 'TELEGRAM',
+        status: 'SUCCESS',
+        message: `Instant Telegram alert delivered for Ref: ${app.applicationRef || app.productName} (${app.status}).`,
+      });
+    } catch (e: any) {
+      console.error('Instant Telegram alert error:', e);
+    }
   };
 
   // Automated Pipeline Execution Routine (Gmail Scan -> Sheet Sync -> Telegram Broadcast)
@@ -386,24 +450,42 @@ export default function App() {
 
     const interval = setInterval(() => {
       const now = new Date();
-      // Format current time HH:MM in Asia/Kuala_Lumpur or local time
-      const hours = String(now.getHours()).padStart(2, '0');
-      const minutes = String(now.getMinutes()).padStart(2, '0');
-      const currentTimeStr = `${hours}:${minutes}`;
+      const tz = automationConfig.timezone || 'Asia/Kuala_Lumpur';
 
-      if (currentTimeStr === automationConfig.scheduleTime) {
-        // Check if we haven't already run today
-        const lastRun = automationConfig.lastRunAt ? new Date(automationConfig.lastRunAt) : null;
-        const isAlreadyRunToday =
-          lastRun &&
-          lastRun.getDate() === now.getDate() &&
-          lastRun.getMonth() === now.getMonth() &&
-          lastRun.getFullYear() === now.getFullYear();
+      // Format current time HH:MM in Asia/Kuala_Lumpur (MYT)
+      const currentTimeStr = new Intl.DateTimeFormat('en-GB', {
+        timeZone: tz,
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: false,
+      }).format(now);
 
-        if (!isAlreadyRunToday && !isRunningAutomation) {
-          console.log(`[Scheduler] Triggering scheduled morning automation at ${currentTimeStr}`);
-          handleRunAutomationNow();
-        }
+      // Format current date in Asia/Kuala_Lumpur (YYYY-MM-DD)
+      const currentDateStr = new Intl.DateTimeFormat('en-CA', {
+        timeZone: tz,
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+      }).format(now);
+
+      let lastRunDateStr = null;
+      if (automationConfig.lastRunAt) {
+        try {
+          lastRunDateStr = new Intl.DateTimeFormat('en-CA', {
+            timeZone: tz,
+            year: 'numeric',
+            month: '2-digit',
+            day: '2-digit',
+          }).format(new Date(automationConfig.lastRunAt));
+        } catch (e) {}
+      }
+
+      const isAlreadyRunToday = lastRunDateStr === currentDateStr;
+
+      // Check if scheduled time has arrived or passed today
+      if (!isAlreadyRunToday && !isRunningAutomation && currentTimeStr >= automationConfig.scheduleTime) {
+        console.log(`[Client Scheduler] Triggering morning automation for ${currentDateStr} at ${currentTimeStr} MYT (Scheduled: ${automationConfig.scheduleTime})`);
+        handleRunAutomationNow();
       }
     }, 30000);
 
@@ -549,8 +631,17 @@ export default function App() {
 
   // Update full application from detail modal
   const handleUpdateApplication = (updatedApp: SirimApplication) => {
+    const prevApp = applications.find((a) => a.id === updatedApp.id);
     setApplications((prev) => prev.map((a) => (a.id === updatedApp.id ? updatedApp : a)));
     setSelectedApplication(updatedApp);
+
+    // If moved to RFI or Sample Requested, trigger instant alert
+    if (
+      (updatedApp.status === 'RFI_ACTION_REQUIRED' || updatedApp.status === 'SAMPLE_REQUESTED') &&
+      prevApp?.status !== updatedApp.status
+    ) {
+      sendInstantTelegramAlert(updatedApp);
+    }
   };
 
   // Add new application from Modal / AI parser
@@ -560,6 +651,14 @@ export default function App() {
     if (sheetConfig?.spreadsheetId && authSession?.accessToken) {
       setTimeout(() => handleSyncToGoogleSheet(), 500);
     }
+    // Instant alert if critical status
+    if (
+      newApp.status === 'RFI_ACTION_REQUIRED' ||
+      newApp.status === 'SAMPLE_REQUESTED' ||
+      newApp.status === 'PAYMENT_PENDING'
+    ) {
+      sendInstantTelegramAlert(newApp);
+    }
   };
 
   // Import batch from Gmail scanner
@@ -568,6 +667,14 @@ export default function App() {
 
     if (sheetConfig?.spreadsheetId && authSession?.accessToken) {
       setTimeout(() => handleSyncToGoogleSheet(), 500);
+    }
+
+    // Alert on any urgent inbound applications
+    const urgent = newApps.find(
+      (a) => a.status === 'RFI_ACTION_REQUIRED' || a.status === 'SAMPLE_REQUESTED'
+    );
+    if (urgent) {
+      sendInstantTelegramAlert(urgent);
     }
   };
 
@@ -598,6 +705,13 @@ export default function App() {
       localStorage.removeItem('sirim_applications_data_v2');
       localStorage.removeItem('sirim_applications_data_v1');
       setSelectedApplication(null);
+
+      fetch('/api/automation/sync-apps', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ applications: [] }),
+      }).catch(() => {});
+
       setIsDetailModalOpen(false);
       notificationAudio.playSuccessTone();
       setSyncFeedback({
