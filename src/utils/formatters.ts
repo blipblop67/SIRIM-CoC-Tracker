@@ -203,6 +203,61 @@ export function formatDate(dateStr?: string): string {
   }
 }
 
+export function getSupplierStatusBadgeInfo(status?: 'NOT_INVOLVED' | 'WAITING_FOR_SUPPLIER_DOCS' | 'DOCUMENTS_RECEIVED_FROM_SUPPLIER' | 'DOCUMENTS_SUBMITTED_TO_SIRIM'): {
+  label: string;
+  bg: string;
+  text: string;
+  border: string;
+  shortLabel: string;
+} | null {
+  if (!status || status === 'NOT_INVOLVED') return null;
+
+  switch (status) {
+    case 'WAITING_FOR_SUPPLIER_DOCS':
+      return {
+        label: 'Waiting for Supplier Docs',
+        shortLabel: 'Pending Supplier',
+        bg: 'bg-amber-50',
+        text: 'text-amber-800',
+        border: 'border-amber-300',
+      };
+    case 'DOCUMENTS_RECEIVED_FROM_SUPPLIER':
+      return {
+        label: 'Supplier Docs Received (Action: Submit to SIRIM)',
+        shortLabel: 'Supplier Docs Ready',
+        bg: 'bg-purple-50',
+        text: 'text-purple-800',
+        border: 'border-purple-300',
+      };
+    case 'DOCUMENTS_SUBMITTED_TO_SIRIM':
+      return {
+        label: 'Supplier Docs Submitted to SIRIM',
+        shortLabel: 'Docs Forwarded',
+        bg: 'bg-teal-50',
+        text: 'text-teal-800',
+        border: 'border-teal-300',
+      };
+  }
+}
+
+export function getAssigneeBadgeInfo(assignee: 'APPLICANT' | 'SIRIM' | 'LAB' | 'SUPPLIER'): {
+  label: string;
+  bg: string;
+  text: string;
+  border: string;
+} {
+  switch (assignee) {
+    case 'APPLICANT':
+      return { label: 'Cytron Action', bg: 'bg-rose-50', text: 'text-rose-700', border: 'border-rose-200' };
+    case 'SUPPLIER':
+      return { label: 'Supplier Action', bg: 'bg-purple-50', text: 'text-purple-700', border: 'border-purple-200' };
+    case 'SIRIM':
+      return { label: 'SIRIM Action', bg: 'bg-blue-50', text: 'text-blue-700', border: 'border-blue-200' };
+    case 'LAB':
+      return { label: 'Lab Action', bg: 'bg-amber-50', text: 'text-amber-700', border: 'border-amber-200' };
+  }
+}
+
 export function getGmailThreadUrl(app: {
   threadId?: string;
   gmailThreadLink?: string;

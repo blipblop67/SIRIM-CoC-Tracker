@@ -31,6 +31,7 @@ import {
   SirimApplication,
   UserAuthSession,
 } from '../types';
+import { safeFetchJson } from '../utils/api';
 
 interface AutomationModalProps {
   isOpen: boolean;
@@ -83,8 +84,7 @@ export const AutomationModal: React.FC<AutomationModalProps> = ({
   const handleResetFirstScan = async () => {
     setIsResettingFirstScan(true);
     try {
-      const res = await fetch('/api/automation/reset-first-scan', { method: 'POST' });
-      const data = await res.json();
+      const data = await safeFetchJson<any>('/api/automation/reset-first-scan', { method: 'POST' });
       if (data.success && data.config) {
         handleUpdate({
           hasCompletedFirstScan: false,
@@ -126,7 +126,7 @@ export const AutomationModal: React.FC<AutomationModalProps> = ({
     setTelegramTestResult(null);
 
     try {
-      const res = await fetch('/api/telegram/test', {
+      const data = await safeFetchJson<any>('/api/telegram/test', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -136,8 +136,7 @@ export const AutomationModal: React.FC<AutomationModalProps> = ({
         }),
       });
 
-      const data = await res.json();
-      if (!res.ok || !data.success) {
+      if (!data.success) {
         throw new Error(data.details || data.error || 'Failed to connect to Telegram');
       }
 
@@ -175,7 +174,7 @@ export const AutomationModal: React.FC<AutomationModalProps> = ({
     setTelegramTestResult(null);
 
     try {
-      const res = await fetch('/api/telegram/send', {
+      const data = await safeFetchJson<any>('/api/telegram/send', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -188,8 +187,7 @@ export const AutomationModal: React.FC<AutomationModalProps> = ({
         }),
       });
 
-      const data = await res.json();
-      if (!res.ok || !data.success) {
+      if (!data.success) {
         throw new Error(data.details || data.error || 'Failed to dispatch Telegram briefing');
       }
 

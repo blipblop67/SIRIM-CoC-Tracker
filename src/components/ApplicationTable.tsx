@@ -10,6 +10,7 @@ import {
   Mail,
   ExternalLink,
   Trash2,
+  Building2,
 } from 'lucide-react';
 import { SirimApplication } from '../types';
 import {
@@ -18,6 +19,8 @@ import {
   calculateDeadlineInfo,
   formatDate,
   getGmailThreadUrl,
+  getSupplierStatusBadgeInfo,
+  getAssigneeBadgeInfo,
 } from '../utils/formatters';
 
 interface ApplicationTableProps {
@@ -52,7 +55,7 @@ export const ApplicationTable: React.FC<ApplicationTableProps> = ({
               <th className="py-3 px-4">Product & Model</th>
               <th className="py-3 px-4">Email Thread</th>
               <th className="py-3 px-4">Scheme</th>
-              <th className="py-3 px-4">Officer</th>
+              <th className="py-3 px-4">Officer & Supplier</th>
               <th className="py-3 px-4">Pending Action Items</th>
               <th className="py-3 px-4">Target SLA</th>
               <th className="py-3 px-4">Certificate / Fee</th>
@@ -142,29 +145,55 @@ export const ApplicationTable: React.FC<ApplicationTableProps> = ({
                     </span>
                   </td>
 
-                  {/* 5. Officer */}
-                  <td className="py-3 px-4">
-                    <div className="font-medium text-slate-800">{app.officerName || 'Not Assigned'}</div>
-                    {app.officerEmail && (
-                      <div className="text-slate-400 text-[11px] font-mono">{app.officerEmail}</div>
+                  {/* 5. Officer & Supplier */}
+                  <td className="py-3 px-4 max-w-xs space-y-1.5">
+                    <div>
+                      <div className="font-medium text-slate-800">{app.officerName || 'SIRIM Officer Pending'}</div>
+                      {app.officerEmail && (
+                        <div className="text-slate-400 text-[11px] font-mono">{app.officerEmail}</div>
+                      )}
+                    </div>
+                    {(app.supplierName || (app.supplierStatus && app.supplierStatus !== 'NOT_INVOLVED')) && (
+                      <div className="flex items-center gap-1.5 text-[11px] bg-purple-50/70 text-purple-900 border border-purple-200/70 rounded px-1.5 py-0.5">
+                        <Building2 className="w-3 h-3 text-purple-600 shrink-0" />
+                        <span className="truncate font-medium">{app.supplierName || 'Hardware Supplier'}</span>
+                        {(() => {
+                          const sBadge = getSupplierStatusBadgeInfo(app.supplierStatus);
+                          if (!sBadge) return null;
+                          return (
+                            <span className="shrink-0 text-[10px] font-semibold text-purple-700 bg-purple-100/80 px-1 rounded">
+                              {sBadge.shortLabel}
+                            </span>
+                          );
+                        })()}
+                      </div>
                     )}
                   </td>
 
-                  {/* 5. Pending Action Items */}
+                  {/* 6. Pending Action Items */}
                   <td className="py-3 px-4 max-w-xs">
                     {pendingActions.length > 0 ? (
                       <div className="space-y-1">
-                        <span
-                          className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-bold ${
-                            hasCritical
-                              ? 'bg-rose-100 text-rose-800 border border-rose-200 animate-pulse'
-                              : 'bg-amber-100 text-amber-800 border border-amber-200'
-                          }`}
-                        >
-                          <AlertTriangle className="w-3 h-3" />
-                          {pendingActions.length} Pending (
-                          {pendingActions[0].assignedTo === 'APPLICANT' ? 'Applicant' : 'SIRIM'})
-                        </span>
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <span
+                            className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-bold ${
+                              hasCritical
+                                ? 'bg-rose-100 text-rose-800 border border-rose-200 animate-pulse'
+                                : 'bg-amber-100 text-amber-800 border border-amber-200'
+                            }`}
+                          >
+                            <AlertTriangle className="w-3 h-3" />
+                            {pendingActions.length} Pending
+                          </span>
+                          {(() => {
+                            const aInfo = getAssigneeBadgeInfo(pendingActions[0].assignedTo);
+                            return (
+                              <span className={`text-[10px] font-medium px-1 rounded border ${aInfo.bg} ${aInfo.text} ${aInfo.border}`}>
+                                {aInfo.label}
+                              </span>
+                            );
+                          })()}
+                        </div>
                         <p className="text-[11px] text-slate-600 line-clamp-1 font-medium">
                           {pendingActions[0].title}
                         </p>

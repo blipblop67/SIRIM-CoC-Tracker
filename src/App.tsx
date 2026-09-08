@@ -44,6 +44,7 @@ import {
   initAuth,
 } from './utils/auth';
 import { notificationAudio } from './utils/audio';
+import { safeFetchJson } from './utils/api';
 
 const APPS_STORAGE_KEY = 'sirim_coc_applications_v2';
 const LEGACY_APPS_STORAGE_KEY_V1 = 'sirim_coc_applications_v1';
@@ -350,7 +351,7 @@ export default function App() {
     });
 
     try {
-      const res = await fetch('/api/automation/run', {
+      const data = await safeFetchJson<any>('/api/automation/run', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -370,8 +371,7 @@ export default function App() {
         }),
       });
 
-      const data = await res.json();
-      if (!res.ok || !data.success) {
+      if (!data.success) {
         throw new Error(data.error || 'Failed to complete automation cycle');
       }
 
@@ -530,7 +530,7 @@ export default function App() {
     setSyncFeedback(null);
 
     try {
-      const res = await fetch('/api/sheets/sync', {
+      const data = await safeFetchJson<any>('/api/sheets/sync', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -543,8 +543,7 @@ export default function App() {
         }),
       });
 
-      const data = await res.json();
-      if (!res.ok || !data.success) {
+      if (!data.success) {
         throw new Error(data.error || 'Failed to sync to Google Sheet');
       }
 

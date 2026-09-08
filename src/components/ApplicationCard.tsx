@@ -24,8 +24,10 @@ import {
   calculateDeadlineInfo,
   formatDate,
   getGmailThreadUrl,
+  getSupplierStatusBadgeInfo,
+  getAssigneeBadgeInfo,
 } from '../utils/formatters';
-import { Mail, Trash2 } from 'lucide-react';
+import { Mail, Trash2, Building2 } from 'lucide-react';
 
 interface ApplicationCardProps {
   application: SirimApplication;
@@ -129,15 +131,36 @@ export const ApplicationCard: React.FC<ApplicationCardProps> = ({
           )}
         </div>
 
-        {/* Officer Information */}
-        {application.officerName && (
-          <div className="flex items-center gap-1.5 text-xs text-slate-600">
-            <User className="w-3.5 h-3.5 text-slate-400 shrink-0" />
-            <span className="truncate">
-              Officer: <strong className="text-slate-700">{application.officerName}</strong>
-            </span>
-          </div>
-        )}
+        {/* Officer & Supplier Information */}
+        <div className="space-y-1">
+          {application.officerName && (
+            <div className="flex items-center gap-1.5 text-xs text-slate-600">
+              <User className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+              <span className="truncate">
+                Officer: <strong className="text-slate-700">{application.officerName}</strong>
+              </span>
+            </div>
+          )}
+
+          {/* Supplier tracking pill */}
+          {(application.supplierName || (application.supplierStatus && application.supplierStatus !== 'NOT_INVOLVED')) && (
+            <div className="flex items-center justify-between gap-1 text-xs bg-slate-50 border border-slate-200/90 rounded px-2 py-1">
+              <div className="flex items-center gap-1.5 min-w-0 text-slate-700 truncate">
+                <Building2 className="w-3 h-3 text-purple-600 shrink-0" />
+                <span className="font-medium truncate">{application.supplierName || 'Hardware Supplier'}</span>
+              </div>
+              {(() => {
+                const suppBadge = getSupplierStatusBadgeInfo(application.supplierStatus);
+                if (!suppBadge) return null;
+                return (
+                  <span className={`shrink-0 text-[10px] font-semibold px-1.5 py-0.5 rounded border ${suppBadge.bg} ${suppBadge.text} ${suppBadge.border}`}>
+                    {suppBadge.shortLabel}
+                  </span>
+                );
+              })()}
+            </div>
+          )}
+        </div>
 
         {/* Approved Certificate Callout */}
         {application.status === 'APPROVED' && application.certificateNo && (
@@ -165,14 +188,19 @@ export const ApplicationCard: React.FC<ApplicationCardProps> = ({
                 <AlertTriangle className="w-3.5 h-3.5 text-amber-600" />
                 Pending Actions ({pendingActions.length})
               </span>
-              <span className="text-[11px] text-slate-500">
-                {pendingActions.some((a) => a.assignedTo === 'APPLICANT') ? 'Cytron Action' : 'SIRIM Action'}
+              <span className="text-[11px] text-slate-500 font-medium">
+                {pendingActions.some((a) => a.assignedTo === 'SUPPLIER')
+                  ? 'Awaiting Supplier'
+                  : pendingActions.some((a) => a.assignedTo === 'APPLICANT')
+                  ? 'Cytron Action'
+                  : 'SIRIM Action'}
               </span>
             </div>
 
             <div className="space-y-1">
               {pendingActions.slice(0, 2).map((action) => {
                 const pInfo = getPriorityBadge(action.priority);
+                const aInfo = getAssigneeBadgeInfo(action.assignedTo);
                 return (
                   <div
                     key={action.id}
@@ -187,11 +215,16 @@ export const ApplicationCard: React.FC<ApplicationCardProps> = ({
                     />
                     <div className="flex-1 min-w-0">
                       <p className="font-medium text-slate-800 line-clamp-1">{action.title}</p>
-                      <div className="flex items-center gap-1.5 mt-0.5">
+                      <div className="flex items-center gap-1.5 mt-0.5 flex-wrap">
                         <span
                           className={`text-[10px] font-bold px-1 rounded border ${pInfo.bg} ${pInfo.text} ${pInfo.border}`}
                         >
                           {action.priority}
+                        </span>
+                        <span
+                          className={`text-[10px] font-medium px-1 rounded border ${aInfo.bg} ${aInfo.text} ${aInfo.border}`}
+                        >
+                          {aInfo.label}
                         </span>
                         {action.dueDate && (
                           <span className="text-[10px] text-slate-500">

@@ -28,7 +28,7 @@ export type ActionItemType =
   | 'AWAIT_SIRIM'
   | 'RENEW_CERTIFICATE';
 
-export type ActionAssignee = 'APPLICANT' | 'SIRIM' | 'LAB';
+export type ActionAssignee = 'APPLICANT' | 'SIRIM' | 'LAB' | 'SUPPLIER';
 
 export interface ActionItem {
   id: string;
@@ -49,6 +49,7 @@ export interface TimelineEvent {
   title: string;
   description: string;
   sender: string;
+  senderRole?: 'SIRIM' | 'APPLICANT' | 'SUPPLIER' | 'LAB' | 'OTHER';
   emailSubject?: string;
   emailSnippet?: string;
   type: 'status_change' | 'rfi' | 'document' | 'payment' | 'approval' | 'sample';
@@ -65,6 +66,7 @@ export interface EmailMessage {
   bodyText?: string;
   hasAttachments?: boolean;
   attachmentNames?: string[];
+  senderRole?: 'SIRIM' | 'APPLICANT' | 'SUPPLIER' | 'LAB' | 'OTHER';
 }
 
 export interface SirimApplication {
@@ -79,6 +81,9 @@ export interface SirimApplication {
   status: SirimStatus;
   officerName?: string;
   officerEmail?: string;
+  supplierName?: string;
+  supplierEmail?: string;
+  supplierStatus?: 'NOT_INVOLVED' | 'WAITING_FOR_SUPPLIER_DOCS' | 'DOCUMENTS_RECEIVED_FROM_SUPPLIER' | 'DOCUMENTS_SUBMITTED_TO_SIRIM';
   submissionDate: string;
   lastActivityDate: string;
   targetDeadline?: string;

@@ -19,6 +19,7 @@ import {
 import confetti from 'canvas-confetti';
 import { UserAuthSession, SirimApplication, ActionItem, TimelineEvent, ScanDurationPreset } from '../types';
 import { notificationAudio } from '../utils/audio';
+import { safeFetchJson } from '../utils/api';
 
 interface GmailScannerModalProps {
   isOpen: boolean;
@@ -97,7 +98,7 @@ export const GmailScannerModal: React.FC<GmailScannerModalProps> = ({
     setSelectedThreadIds(new Set());
 
     try {
-      const res = await fetch('/api/gmail/search', {
+      const data = await safeFetchJson<any>('/api/gmail/search', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -111,8 +112,7 @@ export const GmailScannerModal: React.FC<GmailScannerModalProps> = ({
         }),
       });
 
-      const data = await res.json();
-      if (!res.ok || !data.success) {
+      if (!data.success) {
         throw new Error(data.error || 'Failed to search Gmail');
       }
 
@@ -158,7 +158,7 @@ export const GmailScannerModal: React.FC<GmailScannerModalProps> = ({
 
       try {
         // Fetch full thread
-        const threadRes = await fetch('/api/gmail/thread-details', {
+        const threadData = await safeFetchJson<any>('/api/gmail/thread-details', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -167,26 +167,37 @@ export const GmailScannerModal: React.FC<GmailScannerModalProps> = ({
           body: JSON.stringify({ threadId }),
         });
 
-        const threadData = await threadRes.json();
         if (!threadData.success || !threadData.messages) continue;
 
         const messages = threadData.messages;
         const lastMessage = messages[messages.length - 1] || {};
         const firstMessage = messages[0] || lastMessage;
 
+        // Construct full chronological thread transcript with explicit boundary tags
+        const threadTranscript = messages.map((m: any, idx: number) => {
+          const isLatest = idx === messages.length - 1;
+          const isFirst = idx === 0;
+          const tag = isLatest
+            ? ' [LATEST MESSAGE IN THREAD - DETERMINES CURRENT STATUS]'
+            : isFirst
+            ? ' [INITIAL APPLICATION MESSAGE]'
+            : '';
+          const content = (m.bodyText || m.snippet || '').trim();
+          return `=== MESSAGE ${idx + 1} OF ${messages.length}${tag} ===\nFROM: ${m.from || 'Unknown'}\nTO: ${m.to || 'Recipient'}\nDATE: ${m.date || 'Unknown'}\nSUBJECT: ${m.subject || ''}\n\nCONTENT:\n${content || '(No text content)'}`;
+        }).join('\n\n------------------------------------------------------------\n\n');
+
         // Parse with Gemini
-        const parseRes = await fetch('/api/gemini/parse-email-thread', {
+        const parseData = await safeFetchJson<any>('/api/gemini/parse-email-thread', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             emailSubject: lastMessage.subject || '',
-            emailBody: messages.map((m: any, idx: number) => `[Message ${idx + 1} - From: ${m.from} | Date: ${m.date} | Subject: ${m.subject}]:\n${m.bodyText || m.snippet}`).join('\n\n---\n\n'),
+            emailBody: threadTranscript,
             sender: lastMessage.from || '',
             date: lastMessage.date || '',
           }),
         });
 
-        const parseData = await parseRes.json();
         if (parseData.success && parseData.data) {
           const aiResult = parseData.data;
 
@@ -249,7 +260,7 @@ export const GmailScannerModal: React.FC<GmailScannerModalProps> = ({
             paymentStatus: aiResult.paymentStatus || 'NOT_APPLICABLE',
             standards: aiResult.detectedStandards || [],
             courierTracking: aiResult.courierTracking || undefined,
-            notes: aiResult.summary || '',
+            notes: aiResult.statusExplanation ? `${aiResult.statusExplanation} — ${aiResult.summary || ''}` : (aiResult.summary || ''),
             emailSubject: lastMessage.subject || `SIRIM / e-ComM Correspondence (${aiResult.applicationRef || 'Update'})`,
             gmailThreadLink: `https://mail.google.com/mail/u/0/#all/${threadId}`,
             actionItems,

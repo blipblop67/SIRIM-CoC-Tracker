@@ -62,6 +62,98 @@ async function generateContentWithRetryAndFallback(
   throw lastError;
 }
 
+// ----------------------------------------------------
+// Recursive MIME Body Extractor for Gmail Messages
+// Handles nested multipart/mixed, multipart/alternative, and HTML text stripping
+// ----------------------------------------------------
+function extractEmailBodyText(payload: any): string {
+  if (!payload) return "";
+
+  function decodeBase64Url(dataStr: string): string {
+    try {
+      const normalized = dataStr.replace(/-/g, "+").replace(/_/g, "/");
+      return Buffer.from(normalized, "base64").toString("utf-8");
+    } catch {
+      return "";
+    }
+  }
+
+  function stripHtml(html: string): string {
+    return html
+      .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "")
+      .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "")
+      .replace(/<br\s*[\/]?>/gi, "\n")
+      .replace(/<\/(p|div|tr|li|h[1-6])>/gi, "\n")
+      .replace(/<[^>]+>/g, " ")
+      .replace(/&nbsp;/gi, " ")
+      .replace(/&amp;/gi, "&")
+      .replace(/&lt;/gi, "<")
+      .replace(/&gt;/gi, ">")
+      .replace(/&quot;/gi, '"')
+      .replace(/&#39;/gi, "'")
+      .replace(/[ \t]+/g, " ")
+      .replace(/\n\s*\n+/g, "\n\n")
+      .trim();
+  }
+
+  let plainText = "";
+  let htmlText = "";
+
+  function traverseParts(parts: any[]) {
+    if (!Array.isArray(parts)) return;
+    for (const part of parts) {
+      if (part.mimeType === "text/plain" && part.body?.data) {
+        plainText += decodeBase64Url(part.body.data) + "\n";
+      } else if (part.mimeType === "text/html" && part.body?.data) {
+        htmlText += decodeBase64Url(part.body.data) + "\n";
+      }
+      if (part.parts && Array.isArray(part.parts)) {
+        traverseParts(part.parts);
+      }
+    }
+  }
+
+  if (payload.parts && Array.isArray(payload.parts)) {
+    traverseParts(payload.parts);
+  } else if (payload.body?.data) {
+    if (payload.mimeType === "text/html") {
+      htmlText = decodeBase64Url(payload.body.data);
+    } else {
+      plainText = decodeBase64Url(payload.body.data);
+    }
+  }
+
+  if (plainText.trim().length > 0) {
+    return plainText.trim();
+  }
+  if (htmlText.trim().length > 0) {
+    return stripHtml(htmlText);
+  }
+  return "";
+}
+
+function extractAttachments(payload: any): { hasAttachments: boolean; attachmentNames: string[] } {
+  const attachmentNames: string[] = [];
+  function traverse(parts: any[]) {
+    if (!Array.isArray(parts)) return;
+    for (const p of parts) {
+      if (p.filename && p.filename.trim().length > 0) {
+        attachmentNames.push(p.filename.trim());
+      }
+      if (p.parts && Array.isArray(p.parts)) {
+        traverse(p.parts);
+      }
+    }
+  }
+  if (payload?.parts) {
+    traverse(payload.parts);
+  }
+  return {
+    hasAttachments: attachmentNames.length > 0,
+    attachmentNames,
+  };
+}
+
 // Heuristic fallback parser for SIRIM emails when model experiences temporary high demand
 function fallbackHeuristicSirimParser(emailSubject: string, emailBody: string, sender: string, date: string) {
   const fullText = `${emailSubject || ""}\n${emailBody || ""}`;
@@ -103,40 +195,196 @@ function fallbackHeuristicSirimParser(emailSubject: string, emailBody: string, s
   const certMatch = fullText.match(/(?:certificate(?:\s*no\.?|\s*number)?|coc(?:\s*no\.?)?)[:\s]+([A-Za-z0-9-_/]{6,30})/i);
   const certificateNo = certMatch ? certMatch[1].trim() : undefined;
   
-  // Status detection based on whole history with priority to latest keywords
-  let status = "UNDER_REVIEW";
-  let scheme = "Type Approval (MCMC/SIRIM)";
-  const lower = fullText.toLowerCase();
+  // ----------------------------------------------------
+  // Precise Status Detection & Multi-Party Analysis (SIRIM + APPLICANT + SUPPLIER)
+  // ----------------------------------------------------
+  const rawChunks = emailBody.split(/(?==== MESSAGE \d+|\[Message \d+|\[[^\]]+ \([^\)]+\)\]:|\n---\n)/gi)
+    .map(c => c.trim())
+    .filter(c => c.length > 0);
 
-  if (lower.includes("approved") || lower.includes("certificate issued") || lower.includes("coa issued") || lower.includes("issuance of certificate")) {
-    status = "APPROVED";
-  } else if (lower.includes("rfi") || lower.includes("request for information") || lower.includes("clarification") || lower.includes("amendment")) {
-    status = "RFI_ACTION_REQUIRED";
-  } else if (lower.includes("sample") && (lower.includes("submit") || lower.includes("courier") || lower.includes("request") || lower.includes("call notice"))) {
-    status = "SAMPLE_REQUESTED";
-  } else if (lower.includes("invoice") || lower.includes("fee") || lower.includes("payment pending") || lower.includes("unpaid")) {
-    status = "PAYMENT_PENDING";
-  } else if (lower.includes("testing in progress") || lower.includes("lab test")) {
-    status = "TESTING_IN_PROGRESS";
+  const latestChunk = rawChunks.length > 0 ? rawChunks[rawChunks.length - 1] : emailBody;
+  const latestLower = latestChunk.toLowerCase();
+  const fullLower = fullText.toLowerCase();
+
+  // Extract Supplier / Vendor details
+  let supplierName: string | undefined;
+  let supplierEmail: string | undefined;
+  let supplierStatus: 'NOT_INVOLVED' | 'WAITING_FOR_SUPPLIER_DOCS' | 'DOCUMENTS_RECEIVED_FROM_SUPPLIER' | 'DOCUMENTS_SUBMITTED_TO_SIRIM' = 'NOT_INVOLVED';
+
+  const supplierEmailMatch = fullText.match(/(?:from|to|cc|supplier|vendor|factory):\s*([a-zA-Z0-9._%+-]+@(?!sirim\.my|mcmc\.gov\.my|cytron\.io)[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/i);
+  if (supplierEmailMatch) {
+    supplierEmail = supplierEmailMatch[1].trim();
   }
 
-  if (lower.includes("special approval")) scheme = "Special Approval";
-  else if (lower.includes("modular approval")) scheme = "Modular Approval";
-  else if (lower.includes("cidb")) scheme = "CIDB Certification";
-  else if (lower.includes("safety") || lower.includes("emc") || lower.includes("ms standards")) scheme = "Safety & EMC (MS Standards)";
+  const supplierNameMatch = fullText.match(/(?:supplier|vendor|factory|manufacturer|oem|odm)[:\s]+([A-Za-z0-9\s.,&-]+?(?:Technologies|Electronics|Co\.?,?\s*Ltd|Inc|Semiconductor|Corp|Factory|Shenzhen|Espressif|Raspberry\s*Pi|Quectel|Simcom))/i) ||
+    fullText.match(/(?:from\s+supplier|dear\s+supplier|supplier\s+team|factory\s+team)[:\s]*([A-Za-z0-9\s.,&-]+)/i);
+  if (supplierNameMatch) {
+    supplierName = supplierNameMatch[1].trim().slice(0, 50);
+  } else if (supplierEmail) {
+    const domainPart = supplierEmail.split('@')[1]?.split('.')[0];
+    if (domainPart && !['gmail', 'yahoo', 'hotmail', 'outlook'].includes(domainPart.toLowerCase())) {
+      supplierName = domainPart.charAt(0).toUpperCase() + domainPart.slice(1) + " Supplier";
+    }
+  }
+
+  // Check if supplier is involved in the thread
+  const hasSupplierInThread = Boolean(
+    supplierEmail ||
+    supplierName ||
+    fullLower.includes("supplier") ||
+    fullLower.includes("vendor") ||
+    fullLower.includes("manufacturer") ||
+    fullLower.includes("factory") ||
+    fullLower.includes("from our supplier") ||
+    fullLower.includes("forward to supplier") ||
+    fullLower.includes("request from supplier")
+  );
+
+  // Check if latest message is sent by applicant (replying to SIRIM or Supplier)
+  const isApplicantReply =
+    (latestLower.includes("from: ") && (latestLower.includes("@cytron") || latestLower.includes("applicant"))) ||
+    latestLower.includes("we have submitted") ||
+    latestLower.includes("uploaded the requested") ||
+    latestLower.includes("attached please find the revised") ||
+    latestLower.includes("forwarding the supplier") ||
+    latestLower.includes("submitted to ecomm") ||
+    latestLower.includes("submitted to sirim");
+
+  // Check if latest message is from supplier providing documents
+  const isSupplierSender =
+    (supplierEmail && latestLower.includes(supplierEmail.toLowerCase())) ||
+    latestLower.includes("dear cytron") ||
+    latestLower.includes("hi cytron") ||
+    latestLower.includes("dear rupa") ||
+    latestLower.includes("hi rupa") ||
+    latestLower.includes("from supplier") ||
+    latestLower.includes("from our factory") ||
+    latestLower.includes("from our lab");
+
+  const isSupplierSendingDocs =
+    (isSupplierSender || hasSupplierInThread) &&
+    (latestLower.includes("attached please find") ||
+     latestLower.includes("please find attached") ||
+     latestLower.includes("here is the test report") ||
+     latestLower.includes("here are the test reports") ||
+     latestLower.includes("attached the rf test report") ||
+     latestLower.includes("attached the safety report") ||
+     latestLower.includes("declaration of conformity") ||
+     latestLower.includes("schematics and pcb") ||
+     latestLower.includes("attached doc") ||
+     latestLower.includes("sharing the test results") ||
+     latestLower.includes("here are the documents for sirim"));
+
+  // Check if applicant has forwarded supplier documents to SIRIM
+  const hasApplicantForwardedToSirim =
+    isApplicantReply &&
+    (latestLower.includes("@sirim.my") || latestLower.includes("officer") || latestLower.includes("encik") || latestLower.includes("puan") || latestLower.includes("sirim team")) &&
+    (latestLower.includes("attached") || latestLower.includes("submitted") || latestLower.includes("uploaded"));
+
+  let status = "UNDER_REVIEW";
+  let scheme = "Type Approval (MCMC/SIRIM)";
+
+  if (latestLower.includes("approved") || latestLower.includes("certificate issued") || latestLower.includes("coa issued") || latestLower.includes("issuance of certificate") || latestLower.includes("type approval granted")) {
+    status = "APPROVED";
+    if (hasSupplierInThread) supplierStatus = "DOCUMENTS_SUBMITTED_TO_SIRIM";
+  } else if (isSupplierSendingDocs && !hasApplicantForwardedToSirim) {
+    // SUPPLIER PROVIDED DOCUMENTS, BUT CYTRON HAS NOT YET FORWARDED/UPLOADED THEM TO SIRIM
+    status = "RFI_ACTION_REQUIRED";
+    supplierStatus = "DOCUMENTS_RECEIVED_FROM_SUPPLIER";
+  } else if (
+    // DOCUMENT REQUESTS (RFI): Check if officer or lab is requesting documents, test reports, schematics, clarifications
+    latestLower.includes("please submit") ||
+    latestLower.includes("please provide") ||
+    latestLower.includes("kindly provide") ||
+    latestLower.includes("kindly submit") ||
+    latestLower.includes("request for information") ||
+    latestLower.includes("rfi") ||
+    latestLower.includes("clarification") ||
+    latestLower.includes("amendment") ||
+    latestLower.includes("test report") ||
+    latestLower.includes("schematic") ||
+    latestLower.includes("user manual") ||
+    latestLower.includes("declaration of conformity") ||
+    latestLower.includes("doc") ||
+    latestLower.includes("authorization letter") ||
+    latestLower.includes("datasheet") ||
+    latestLower.includes("missing document") ||
+    latestLower.includes("required document") ||
+    latestLower.includes("upload document") ||
+    latestLower.includes("rectify") ||
+    latestLower.includes("discrepancy") ||
+    latestLower.includes("furnish")
+  ) {
+    if (hasApplicantForwardedToSirim) {
+      status = "UNDER_REVIEW"; // Applicant has already submitted supplier/updated docs to SIRIM
+      if (hasSupplierInThread) supplierStatus = "DOCUMENTS_SUBMITTED_TO_SIRIM";
+    } else if (hasSupplierInThread && (latestLower.includes("waiting for supplier") || latestLower.includes("requested from supplier") || latestLower.includes("checking with factory"))) {
+      status = "RFI_ACTION_REQUIRED";
+      supplierStatus = "WAITING_FOR_SUPPLIER_DOCS";
+    } else {
+      status = "RFI_ACTION_REQUIRED"; // Officer is waiting for documents
+      if (hasSupplierInThread) supplierStatus = "WAITING_FOR_SUPPLIER_DOCS";
+    }
+  } else if (
+    latestLower.includes("sample") &&
+    (latestLower.includes("submit") || latestLower.includes("courier") || latestLower.includes("deliver") || latestLower.includes("call notice") || latestLower.includes("shah alam") || latestLower.includes("building 25") || latestLower.includes("test unit"))
+  ) {
+    if (isApplicantReply || courierTracking || latestLower.includes("tracking") || latestLower.includes("consignment")) {
+      status = "SAMPLE_SUBMITTED";
+    } else {
+      status = "SAMPLE_REQUESTED";
+    }
+  } else if (
+    // PAYMENT: ONLY when explicitly asking for payment and NOT asking for documents
+    (latestLower.includes("payment pending") || latestLower.includes("please make payment") || latestLower.includes("unpaid invoice") || latestLower.includes("remit payment") || latestLower.includes("fee is due")) &&
+    !latestLower.includes("document") && !latestLower.includes("report") && !latestLower.includes("schematic")
+  ) {
+    status = "PAYMENT_PENDING";
+  } else if (latestLower.includes("testing in progress") || latestLower.includes("lab test") || latestLower.includes("undergoing testing")) {
+    status = "TESTING_IN_PROGRESS";
+  } else if (fullLower.includes("submitted") || fullLower.includes("e-comm submission")) {
+    status = "UNDER_REVIEW";
+  }
+
+  if (fullLower.includes("special approval")) scheme = "Special Approval";
+  else if (fullLower.includes("modular approval")) scheme = "Modular Approval";
+  else if (fullLower.includes("cidb")) scheme = "CIDB Certification";
+  else if (fullLower.includes("safety") || fullLower.includes("emc") || fullLower.includes("ms standards")) scheme = "Safety & EMC (MS Standards)";
 
   // Action items
   const actionItems: any[] = [];
   if (status === "RFI_ACTION_REQUIRED") {
-    actionItems.push({
-      title: "Provide technical documentation or clarification requested by SIRIM",
-      description: "Review SIRIM queries and reply with updated schematics, user manual, or RF test reports.",
-      assignedTo: "APPLICANT",
-      dueDate: new Date(Date.now() + 7 * 86400000).toISOString().split("T")[0],
-      priority: "HIGH",
-      requiredActionType: "PROVIDE_CLARIFICATION",
-      emailSourceSnippet: cleanSubject,
-    });
+    if (supplierStatus === "DOCUMENTS_RECEIVED_FROM_SUPPLIER") {
+      actionItems.push({
+        title: `Review and submit ${supplierName ? `${supplierName} ` : ""}supplier documents to SIRIM officer`,
+        description: `Supplier has provided the requested CoC technical documents in the thread. Verify file formats (RF/EMC reports, schematics, DoC) and upload to e-ComM / email to SIRIM officer.`,
+        assignedTo: "APPLICANT",
+        dueDate: new Date(Date.now() + 5 * 86400000).toISOString().split("T")[0],
+        priority: "HIGH",
+        requiredActionType: "SUBMIT_DOC",
+        emailSourceSnippet: cleanSubject,
+      });
+    } else if (supplierStatus === "WAITING_FOR_SUPPLIER_DOCS") {
+      actionItems.push({
+        title: `Follow up with supplier${supplierName ? ` (${supplierName})` : ""} for missing CoC technical documents`,
+        description: "SIRIM officer requested technical reports/schematics. Follow up with supplier to secure the required documentation.",
+        assignedTo: "SUPPLIER",
+        dueDate: new Date(Date.now() + 5 * 86400000).toISOString().split("T")[0],
+        priority: "HIGH",
+        requiredActionType: "SUBMIT_DOC",
+        emailSourceSnippet: cleanSubject,
+      });
+    } else {
+      actionItems.push({
+        title: "Submit required technical documentation / clarification to SIRIM",
+        description: "Review SIRIM queries and reply with updated schematics, user manual, test reports, or declarations.",
+        assignedTo: "APPLICANT",
+        dueDate: new Date(Date.now() + 7 * 86400000).toISOString().split("T")[0],
+        priority: "HIGH",
+        requiredActionType: "SUBMIT_DOC",
+        emailSourceSnippet: cleanSubject,
+      });
+    }
   } else if (status === "SAMPLE_REQUESTED") {
     actionItems.push({
       title: "Deliver test samples to SIRIM QAS Lab (Building 25, Shah Alam)",
@@ -161,21 +409,21 @@ function fallbackHeuristicSirimParser(emailSubject: string, emailBody: string, s
 
   // Build timeline events (if multiple messages are embedded in the body, parse each one)
   const timelineEvents: any[] = [];
-  const messageChunks = emailBody.split(/(?=\[[^\]]+ \([^\)]+\)\]:)/);
+  const messageChunks = emailBody.split(/(?==== MESSAGE \d+|\[Message \d+|\[[^\]]+ \([^\)]+\)\]:|\n---\n)/gi).filter(c => c.trim().length > 0);
   if (messageChunks.length > 1) {
     messageChunks.forEach((chunk, i) => {
-      const matchHeader = chunk.match(/\[([^\]]+) \(([^\)]+)\)\]:/);
-      const chunkSender = matchHeader ? matchHeader[1] : sender || "SIRIM QAS";
-      const chunkDate = matchHeader ? matchHeader[2] : date;
+      const matchHeader = chunk.match(/\[([^\]]+) \(([^\)]+)\)\]:/) || chunk.match(/FROM:\s*([^\n]+)[\s\S]*?DATE:\s*([^\n]+)/i);
+      const chunkSender = matchHeader ? matchHeader[1].trim() : sender || "SIRIM QAS";
+      const chunkDate = matchHeader ? matchHeader[2].trim() : date;
       const parsedDate = chunkDate ? new Date(chunkDate).toISOString().split("T")[0] : new Date().toISOString().split("T")[0];
       const chunkSnippet = chunk.replace(/\[[^\]]+ \([^\)]+\)\]:\s*/, "").slice(0, 150).trim();
 
       let evtType = "document";
       let evtTitle = `Email Update: ${cleanSubject.slice(0, 40)}`;
       const cLow = chunk.toLowerCase();
-      if (cLow.includes("rfi") || cLow.includes("clarification")) {
+      if (cLow.includes("rfi") || cLow.includes("clarification") || cLow.includes("document") || cLow.includes("test report")) {
         evtType = "rfi";
-        evtTitle = "SIRIM Clarification Query (RFI)";
+        evtTitle = "SIRIM Document Request / Clarification (RFI)";
       } else if (cLow.includes("sample")) {
         evtType = "sample";
         evtTitle = "Test Sample Request / Dispatch";
@@ -221,6 +469,9 @@ function fallbackHeuristicSirimParser(emailSubject: string, emailBody: string, s
     status,
     officerName,
     officerEmail: sender.includes("@sirim.my") ? sender : undefined,
+    supplierName,
+    supplierEmail,
+    supplierStatus,
     submissionDate: date ? date.split("T")[0] : new Date().toISOString().split("T")[0],
     lastActivityDate: new Date().toISOString().split("T")[0],
     targetDeadline: new Date(Date.now() + 7 * 86400000).toISOString().split("T")[0],
@@ -239,7 +490,7 @@ function fallbackHeuristicSirimParser(emailSubject: string, emailBody: string, s
 
 async function startServer() {
   const app = express();
-  const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
+  const PORT = 3000;
 
   app.use(express.json({ limit: "15mb" }));
 
@@ -271,13 +522,78 @@ async function startServer() {
       const prompt = `You are an expert Malaysian regulatory compliance specialist in SIRIM QAS International, e-ComM (MCMC), CIDB, and Certificate of Conformity (CoC) certification procedures.
 Analyze the following email communication or full multi-stage email thread related to a SIRIM certification application. The thread may span several weeks, months, or up to 1 year of historical back-and-forth communication.
 
-Extract comprehensive, accurate, structured regulatory data and reconstruct the complete chronological milestone progression of the application.
+CRITICAL INSTRUCTIONS FOR READING THE ENTIRE THREAD:
+1. READ EVERY SINGLE MESSAGE IN THE THREAD: Do not stop at the first or last message. Trace the chronological history from Message 1 to the final message.
+2. RECONSTRUCT THE TIMELINE: Extract all milestones across the thread into 'timelineEvents' (e.g. Initial Submission, Quotation/Fee issued, Samples requested/sent, Clarifications/RFIs raised, Officer responses, Supplier document delivery, Final Evaluation, Approval).
+
+CRITICAL MULTI-PARTY HANDLING (SIRIM OFFICER + APPLICANT + SUPPLIER/OEM/VENDOR):
+The email thread may involve THREE or more distinct parties:
+1. SIRIM QAS / e-ComM / MCMC Officer: Regulating authority requesting documents, fees, samples, or issuing approval.
+2. Applicant (Cytron Technologies / Compliance team): Company managing the application and coordinating with SIRIM and suppliers.
+3. Supplier / Hardware Vendor / OEM / ODM / Component Manufacturer (e.g. Espressif, Raspberry Pi, Shenzhen supplier, vendor lab): The hardware manufacturer sending technical documents needed for SIRIM CoC (e.g., MS IEC 62368-1 safety test reports, RF/EMC test reports, circuit schematics, PCB layout, block diagrams, EU/CE Declaration of Conformity, user manuals).
+
+CRITICAL RULES FOR SUPPLIER PARTICIPATION & LATEST STATUS:
+- Extract 'supplierName' and 'supplierEmail' if a supplier or external manufacturer is present in the thread.
+- EVALUATE THE STATUS ACCORDING TO SUPPLIER DOCUMENT FLOW:
+  a) IF THE LATEST MESSAGE IS FROM THE SUPPLIER SENDING/ATTACHING THE REQUESTED DOCUMENTS TO CYTRON:
+     * NOTE: SIRIM has NOT received these documents yet! Cytron must review and submit/forward them to the SIRIM officer or e-ComM portal.
+     * STATUS MUST BE: 'RFI_ACTION_REQUIRED'
+     * ACTION ITEM: Assigned to 'APPLICANT' (e.g., "Review supplier documents and submit/upload to SIRIM officer").
+     * 'supplierStatus': 'DOCUMENTS_RECEIVED_FROM_SUPPLIER'
+     * 'statusExplanation': "Supplier has provided the requested CoC technical documents in the thread. Cytron compliance team must verify and submit/upload them to SIRIM."
+
+  b) IF SIRIM ISSUED AN RFI FOR DOCUMENTS AND APPLICANT IS WAITING FOR THE SUPPLIER TO PROVIDE THEM:
+     * STATUS MUST BE: 'RFI_ACTION_REQUIRED'
+     * ACTION ITEM: Assigned to 'SUPPLIER' (e.g., "Obtain RF/EMC test reports and schematics from supplier").
+     * 'supplierStatus': 'WAITING_FOR_SUPPLIER_DOCS'
+     * 'statusExplanation': "Waiting for hardware supplier to furnish required CoC test reports/schematics."
+
+  c) IF APPLICANT HAS ALREADY FORWARDED/SUBMITTED THE SUPPLIER'S DOCUMENTS TO SIRIM OFFICER:
+     * STATUS: 'UNDER_REVIEW'
+     * 'supplierStatus': 'DOCUMENTS_SUBMITTED_TO_SIRIM'
+     * 'statusExplanation': "Supplier documents have been submitted to SIRIM; awaiting officer review."
+
+  d) IF NO SUPPLIER IS INVOLVED:
+     * 'supplierStatus': 'NOT_INVOLVED'
+
+CRITICAL STATUS CLASSIFICATION RULES (BASED ON THE LATEST STATE):
+- 'RFI_ACTION_REQUIRED':
+  CHOOSE THIS whenever the SIRIM officer, e-ComM officer, or testing lab is requesting technical documents, reports, or clarifications, OR when supplier has provided documents that have not yet been submitted to SIRIM. This includes:
+  * RF test reports, EMC test reports, Safety test reports (MS IEC 62368-1), SAR reports.
+  * Product schematics, PCB layout, block diagram, technical specifications, user manual, datasheet.
+  * Declaration of Conformity (DoC), Letter of Authorization, brand authorization.
+  * Exterior/interior product photos, marking/label artwork, rating plate drawings.
+  * Any written clarifications, answers to officer queries, or amendments.
+  IMPORTANT: Even if an invoice number, quotation, or processing fee is mentioned in the thread or in a quotation table, IF SIRIM IS REQUESTING TECHNICAL DOCUMENTS OR TEST REPORTS, THE STATUS MUST BE 'RFI_ACTION_REQUIRED' (NOT 'PAYMENT_PENDING')!
+
+- 'PAYMENT_PENDING':
+  ONLY choose this if paying an outstanding invoice/fee or uploading payment receipt is the EXCLUSIVE or PRIMARY pending action, and SIRIM is NOT waiting for technical documents or test reports.
+
+- 'UNDER_REVIEW':
+  Choose this if:
+  * The application was submitted and is undergoing initial technical review by SIRIM.
+  * OR the applicant (Cytron) already responded to the previous RFI by sending/uploading the requested documents (including supplier documents), and is now waiting for the SIRIM officer to evaluate them.
+
+- 'SAMPLE_REQUESTED':
+  SIRIM has issued a call notice requesting physical hardware test samples to be delivered/couriered to SIRIM QAS Lab (Building 25, Shah Alam).
+
+- 'SAMPLE_SUBMITTED':
+  The applicant has dispatched the physical samples and provided courier tracking consignment info (e.g. GDEX, PosLaju, DHL).
+
+- 'TESTING_IN_PROGRESS':
+  SIRIM QAS lab or accredited third-party lab is actively conducting laboratory tests (RF, EMC, Safety).
+
+- 'FINAL_EVALUATION':
+  Testing and document evaluation are completed; application is queued for final approval committee review.
+
+- 'APPROVED':
+  SIRIM QAS has approved the application, issued the Certificate of Conformity (CoC) / Type Approval / e-ComM certificate, or granted certification.
 
 EMAIL DETAILS:
 From: ${sender || "Unknown"}
 Date: ${date || new Date().toISOString()}
 Subject: ${emailSubject || ""}
-Body:
+Full Thread Body:
 ${emailBody || ""}
 
 ${
@@ -295,20 +611,21 @@ OUTPUT RULES:
 2. Extract the Application Reference No / Job No (e.g. SQAS/CMCS/2026/..., eComM Ref, etc.). If none found, generate a plausible reference based on the subject.
 3. Extract Product Name, Model Number, Brand, Applicant company name (e.g. Cytron Technologies Sdn Bhd).
 4. Identify Certification Scheme ('Type Approval (MCMC/SIRIM)', 'Special Approval', 'Modular Approval', 'CIDB Certification', 'Safety & EMC (MS Standards)').
-5. Identify current status based on the LATEST message in the thread: 'SUBMITTED', 'UNDER_REVIEW', 'SAMPLE_REQUESTED', 'SAMPLE_SUBMITTED', 'TESTING_IN_PROGRESS', 'RFI_ACTION_REQUIRED', 'PAYMENT_PENDING', 'FINAL_EVALUATION', 'APPROVED', 'REJECTED', 'EXPIRED'.
-6. Extract officer name and direct email if mentioned.
-7. Extract Malaysian standards tested against (e.g., MS IEC 62368-1, MCMC MTSFB TC T007, CISPR 32, etc.).
-8. Extract any courier tracking consignment numbers for test sample deliveries to SIRIM QAS (e.g. GDEX, PosLaju, DHL).
-9. Extract Quotation/Invoice number and processing fee in RM (Ringgit Malaysia).
-10. Extract Certificate Number and Expiry Date if approved.
-11. Extract critical active action items required by SIRIM or Lab.
-12. IMPORTANT: Extract ALL chronological timeline milestones across the entire thread history into 'timelineEvents' (e.g., initial submission, quotation issued, sample requested, RFI clarification sent, lab evaluation, approval). Also provide a single 'timelineEvent' for the latest update.
+5. Identify current status based on the CRITICAL STATUS CLASSIFICATION RULES above.
+6. Provide a concise 'statusExplanation' stating why this status was determined from the latest communication.
+7. Extract officer name and direct email if mentioned.
+8. Extract Malaysian standards tested against (e.g., MS IEC 62368-1, MCMC MTSFB TC T007, CISPR 32, etc.).
+9. Extract any courier tracking consignment numbers for test sample deliveries to SIRIM QAS (e.g. GDEX, PosLaju, DHL).
+10. Extract Quotation/Invoice number and processing fee in RM (Ringgit Malaysia).
+11. Extract Certificate Number and Expiry Date if approved.
+12. Extract critical active action items required by SIRIM or Lab.
+13. IMPORTANT: Extract ALL chronological timeline milestones across the entire thread history into 'timelineEvents' (e.g., initial submission, quotation issued, sample requested, RFI clarification sent, lab evaluation, approval). Also provide a single 'timelineEvent' for the latest update.
 
 Return ONLY a valid JSON object matching this schema.`;
 
       const response = await generateContentWithRetryAndFallback(
         ai,
-        "gemini-3.7-flash",
+        "gemini-3.8-flash",
         prompt,
         {
           responseMimeType: "application/json",
@@ -348,8 +665,20 @@ Return ONLY a valid JSON object matching this schema.`;
                   "EXPIRED",
                 ],
               },
+              statusExplanation: { type: Type.STRING },
               officerName: { type: Type.STRING },
               officerEmail: { type: Type.STRING },
+              supplierName: { type: Type.STRING },
+              supplierEmail: { type: Type.STRING },
+              supplierStatus: {
+                type: Type.STRING,
+                enum: [
+                  "NOT_INVOLVED",
+                  "WAITING_FOR_SUPPLIER_DOCS",
+                  "DOCUMENTS_RECEIVED_FROM_SUPPLIER",
+                  "DOCUMENTS_SUBMITTED_TO_SIRIM",
+                ],
+              },
               submissionDate: { type: Type.STRING },
               lastActivityDate: { type: Type.STRING },
               targetDeadline: { type: Type.STRING },
@@ -377,7 +706,7 @@ Return ONLY a valid JSON object matching this schema.`;
                     description: { type: Type.STRING },
                     assignedTo: {
                       type: Type.STRING,
-                      enum: ["APPLICANT", "SIRIM", "LAB"],
+                      enum: ["APPLICANT", "SIRIM", "LAB", "SUPPLIER"],
                     },
                     dueDate: { type: Type.STRING },
                     priority: {
@@ -407,6 +736,10 @@ Return ONLY a valid JSON object matching this schema.`;
                   title: { type: Type.STRING },
                   description: { type: Type.STRING },
                   sender: { type: Type.STRING },
+                  senderRole: {
+                    type: Type.STRING,
+                    enum: ["SIRIM_OFFICER", "APPLICANT", "SUPPLIER", "TEST_LAB", "OTHER"],
+                  },
                   emailSubject: { type: Type.STRING },
                   emailSnippet: { type: Type.STRING },
                   type: {
@@ -425,6 +758,10 @@ Return ONLY a valid JSON object matching this schema.`;
                     title: { type: Type.STRING },
                     description: { type: Type.STRING },
                     sender: { type: Type.STRING },
+                    senderRole: {
+                      type: Type.STRING,
+                      enum: ["SIRIM_OFFICER", "APPLICANT", "SUPPLIER", "TEST_LAB", "OTHER"],
+                    },
                     emailSubject: { type: Type.STRING },
                     emailSnippet: { type: Type.STRING },
                     type: {
@@ -481,7 +818,7 @@ Return ONLY a valid JSON object matching this schema.`;
   });
 
   // ----------------------------------------------------
-  // 2. Gemini AI: Draft Official Response to SIRIM
+  // 2. Gemini AI: Draft Official Response (to SIRIM or Supplier)
   // ----------------------------------------------------
   app.post("/api/gemini/generate-reply", async (req: Request, res: Response) => {
     const {
@@ -489,7 +826,10 @@ Return ONLY a valid JSON object matching this schema.`;
       productName,
       modelNumber,
       officerName,
-      responseIntent, // 'SUBMIT_DOCS' | 'REQUEST_EXTENSION' | 'STATUS_FOLLOWUP' | 'SAMPLE_TRACKING' | 'CUSTOM'
+      recipientType = "SIRIM", // 'SIRIM' | 'SUPPLIER'
+      supplierName,
+      supplierEmail,
+      responseIntent, // 'SUBMIT_DOCS' | 'REQUEST_EXTENSION' | 'STATUS_FOLLOWUP' | 'SAMPLE_TRACKING' | 'REQUEST_SUPPLIER_DOCS' | 'FOLLOWUP_SUPPLIER' | 'CUSTOM'
       customNotes,
       actionItemDetails,
     } = req.body;
@@ -497,7 +837,28 @@ Return ONLY a valid JSON object matching this schema.`;
     try {
       const ai = getGeminiClient();
 
-      const prompt = `You are a professional regulatory compliance manager at a high-tech Malaysian electronics & IoT manufacturer.
+      const isSupplierTarget = recipientType === "SUPPLIER";
+
+      const prompt = isSupplierTarget
+        ? `You are a technical compliance specialist at Cytron Technologies Sdn Bhd (Malaysian electronics & IoT company).
+Draft an urgent, clear, and professional B2B email to our Hardware Supplier / ODM / Manufacturer (${supplierName || "Supplier Team"}) requesting the mandatory technical documentation needed for SIRIM QAS International Certificate of Conformity (CoC) / Type Approval.
+
+PRODUCT & REGULATORY DETAILS:
+- Product Name: ${productName || "N/A"}
+- Model Number: ${modelNumber || "N/A"}
+- SIRIM Application Ref: ${applicationRef || "N/A"}
+- Supplier: ${supplierName || "Hardware Supplier Team"} (${supplierEmail || "supplier@vendor.com"})
+- Purpose / Intent: ${responseIntent || "REQUEST_SUPPLIER_DOCS"}
+- Specific Documents / Action Required: ${actionItemDetails || "Missing test reports, schematics, and Declaration of Conformity"}
+- User Notes: ${customNotes || "Please supply unredacted laboratory test reports and complete schematics"}
+
+DRAFTING GUIDELINES:
+- Formal, cooperative, and urgent B2B engineering tone.
+- Clearly enumerate the exact technical documents SIRIM requires (e.g. MS IEC 62368-1 / IEC 62368-1 safety test report with ILAC-MRA mark, RF & EMC test reports, circuit schematics, PCB trace layout, EU/CE Declaration of Conformity, manufacturer authorization letter).
+- Emphasize regulatory deadlines so the application does not stall or lapse.
+
+Return a JSON with "subject", "body", and "suggestedAttachments" (array of strings).`
+        : `You are a professional regulatory compliance manager at a high-tech Malaysian electronics & IoT manufacturer (Cytron Technologies Sdn Bhd).
 Draft an official, polite, and compliant email reply to SIRIM QAS International regarding a Certificate of Conformity (CoC) / Type Approval application.
 
 APPLICATION DETAILS:
@@ -508,11 +869,13 @@ APPLICATION DETAILS:
 - Purpose / Intent: ${responseIntent}
 - Specific Action Item / Context: ${actionItemDetails || ""}
 - Additional User Notes / Clarification: ${customNotes || "Standard submission of requested documentation/information"}
+${supplierName ? `- Supplier Origin of Documents: ${supplierName}` : ""}
 
 DRAFTING GUIDELINES:
 - Include a clear formal subject line with Reference Number and Model Name (e.g., "RE: SQAS/CMCS/... - Submission of Revised Technical Documents")
 - Formal Malaysian business letter salutation and closing ("Dear Encik/Puan/Mr/Ms...", "Best regards, Regulatory Compliance Team")
 - Clear itemized points answering the officer's queries or providing courier tracking / payment proof details.
+- If forwarding supplier documents (test reports, schematics), explicitly state that they have been reviewed and verified by Cytron.
 - Professional, respectful, and compliant tone conforming to Malaysian Standards (MS) and MCMC regulatory conventions.
 
 Return a JSON with "subject", "body", and "suggestedAttachments" (array of strings).`;
@@ -544,11 +907,18 @@ Return a JSON with "subject", "body", and "suggestedAttachments" (array of strin
       res.json({ success: true, draft: parsedDraft });
     } catch (err: any) {
       console.warn("Gemini AI draft reply error, generating fallback draft template:", err?.message || err);
-      const fallbackDraft = {
-        subject: `RE: ${applicationRef || "SIRIM CoC"} - ${responseIntent === "SUBMIT_DOCS" ? "Submission of Requested Documents" : responseIntent === "REQUEST_EXTENSION" ? "Request for Extension of Time" : responseIntent === "SAMPLE_TRACKING" ? "Submission of Test Samples Courier Details" : "Follow-up on Application Status"}`,
-        body: `Dear ${officerName || "SIRIM QAS Certification Officer"},\n\nWe refer to our Certificate of Conformity / Type Approval application for reference ${applicationRef || "N/A"} (${productName || "Equipment"}, Model: ${modelNumber || "N/A"}).\n\n${customNotes || (actionItemDetails ? `Regarding the requested item: "${actionItemDetails}", we have reviewed the requirements and prepared the necessary updates.` : "We are pleased to provide the requested information and documentation as required by the technical evaluation team.")}\n\nPlease let us know if any further clarification or documentation is required for your evaluation.\n\nThank you for your assistance.\n\nBest regards,\nRegulatory Compliance Team\nCytron Technologies Sdn Bhd`,
-        suggestedAttachments: responseIntent === "SUBMIT_DOCS" ? ["Technical_Datasheet_v2.pdf", "RF_Test_Report.pdf"] : responseIntent === "SAMPLE_TRACKING" ? ["Courier_Consignment_Note.pdf"] : ["Company_Cover_Letter.pdf"]
-      };
+      const isSupplierTarget = req.body?.recipientType === "SUPPLIER";
+      const fallbackDraft = isSupplierTarget
+        ? {
+            subject: `URGENT: Technical Documentation Required for SIRIM CoC Approval - ${productName || "Product"} (${modelNumber || "Model"})`,
+            body: `Dear ${supplierName || "Supplier Team"},\n\nWe are currently processing the Malaysian SIRIM QAS Certificate of Conformity (CoC) / Type Approval for ${productName || "Equipment"} (Model: ${modelNumber || "N/A"}).\n\nSIRIM regulatory evaluators have requested the following technical documentation:\n${actionItemDetails ? `- ${actionItemDetails}\n` : ""}- Full RF and EMC Test Reports (with test frequency allocation and EIRP tables)\n- MS IEC 62368-1 / IEC 62368-1 Safety Test Report (ISO/IEC 17025 accredited)\n- Circuit Schematics & PCB Layout Diagram\n- EU/CE Declaration of Conformity (DoC)\n\nPlease provide these documents at your earliest convenience to avoid application delays.\n\nBest regards,\nRegulatory Compliance Team\nCytron Technologies Sdn Bhd`,
+            suggestedAttachments: ["SIRIM_Requirement_Checklist.pdf"]
+          }
+        : {
+            subject: `RE: ${applicationRef || "SIRIM CoC"} - ${responseIntent === "SUBMIT_DOCS" ? "Submission of Requested Documents" : responseIntent === "REQUEST_EXTENSION" ? "Request for Extension of Time" : responseIntent === "SAMPLE_TRACKING" ? "Submission of Test Samples Courier Details" : "Follow-up on Application Status"}`,
+            body: `Dear ${officerName || "SIRIM QAS Certification Officer"},\n\nWe refer to our Certificate of Conformity / Type Approval application for reference ${applicationRef || "N/A"} (${productName || "Equipment"}, Model: ${modelNumber || "N/A"}).\n\n${customNotes || (actionItemDetails ? `Regarding the requested item: "${actionItemDetails}", we have reviewed the requirements and prepared the necessary updates.` : "We are pleased to provide the requested information and documentation as required by the technical evaluation team.")}\n\nPlease let us know if any further clarification or documentation is required for your evaluation.\n\nThank you for your assistance.\n\nBest regards,\nRegulatory Compliance Team\nCytron Technologies Sdn Bhd`,
+            suggestedAttachments: responseIntent === "SUBMIT_DOCS" ? ["Technical_Datasheet_v2.pdf", "RF_Test_Report.pdf"] : responseIntent === "SAMPLE_TRACKING" ? ["Courier_Consignment_Note.pdf"] : ["Company_Cover_Letter.pdf"]
+          };
       res.json({ success: true, draft: fallbackDraft, isFallback: true });
     }
   });
@@ -1065,18 +1435,10 @@ Return a JSON with "subject", "body", and "suggestedAttachments" (array of strin
         const to = headers.find((h) => h.name?.toLowerCase() === "to")?.value || "";
         const date = headers.find((h) => h.name?.toLowerCase() === "date")?.value || "";
 
-        // Extract body plain text if available
-        let bodyText = msg.snippet || "";
-        if (msg.payload?.parts) {
-          for (const part of msg.payload.parts) {
-            if (part.mimeType === "text/plain" && part.body?.data) {
-              bodyText = Buffer.from(part.body.data, "base64").toString("utf-8");
-              break;
-            }
-          }
-        } else if (msg.payload?.body?.data) {
-          bodyText = Buffer.from(msg.payload.body.data, "base64").toString("utf-8");
-        }
+        // Extract body plain text or clean HTML text using recursive MIME traversal
+        const extractedBody = extractEmailBodyText(msg.payload);
+        const bodyText = extractedBody.trim().length > 0 ? extractedBody : (msg.snippet || "");
+        const attachmentData = extractAttachments(msg.payload);
 
         parsedMessages.push({
           id: msg.id,
@@ -1085,9 +1447,10 @@ Return a JSON with "subject", "body", and "suggestedAttachments" (array of strin
           to,
           date,
           subject,
-          snippet: msg.snippet,
+          snippet: msg.snippet || bodyText.slice(0, 120),
           bodyText,
-          hasAttachments: (msg.payload?.parts || []).some((p) => Boolean(p.filename)),
+          hasAttachments: attachmentData.hasAttachments,
+          attachmentNames: attachmentData.attachmentNames,
         });
       }
 
@@ -1648,18 +2011,22 @@ Return a JSON with "subject", "body", and "suggestedAttachments" (array of strin
               const threadTranscript = messages.map((m: any, mIdx: number) => {
                 const mHeaders = m.payload?.headers || [];
                 const mFrom = mHeaders.find((h: any) => h.name?.toLowerCase() === "from")?.value || "Unknown";
+                const mTo = mHeaders.find((h: any) => h.name?.toLowerCase() === "to")?.value || "";
                 const mDate = mHeaders.find((h: any) => h.name?.toLowerCase() === "date")?.value || "";
-                let text = m.snippet || "";
-                if (m.payload?.parts) {
-                  for (const part of m.payload.parts) {
-                    if (part.mimeType === "text/plain" && part.body?.data) {
-                      text = Buffer.from(part.body.data, "base64").toString("utf-8");
-                      break;
-                    }
-                  }
-                }
-                return `[Message ${mIdx + 1} | From: ${mFrom} | Date: ${mDate}]\n${text.slice(0, 1500)}`;
-              }).join("\n\n---\n\n");
+                const mSub = mHeaders.find((h: any) => h.name?.toLowerCase() === "subject")?.value || "";
+                const extracted = extractEmailBodyText(m.payload);
+                const text = extracted.trim().length > 0 ? extracted : (m.snippet || "");
+                const isLatest = mIdx === messages.length - 1;
+                const tag = isLatest ? " [LATEST MESSAGE IN THREAD - DETERMINES CURRENT STATUS]" : "";
+                return `=== MESSAGE ${mIdx + 1} OF ${messages.length}${tag} ===
+FROM: ${mFrom}
+TO: ${mTo}
+DATE: ${mDate}
+SUBJECT: ${mSub}
+
+BODY:
+${text}`;
+              }).join("\n\n------------------------------------------------------------\n\n");
 
               // Determine if this thread matches an existing application
               const existingIdx = currentApplications.findIndex(
@@ -1671,16 +2038,51 @@ Return a JSON with "subject", "body", and "suggestedAttachments" (array of strin
               let parsed: any = null;
               try {
                 const ai = getGeminiClient();
-                const prompt = `Analyze this multi-stage Malaysian SIRIM certification email thread (${messages.length} messages, dating from ${firstDate} to ${lastDate}):
+                const prompt = `You are an expert Malaysian regulatory compliance specialist in SIRIM QAS International, e-ComM (MCMC), CIDB, and Certificate of Conformity (CoC) certification procedures.
+Analyze this multi-stage Malaysian SIRIM certification email thread (${messages.length} messages, dating from ${firstDate} to ${lastDate}):
 Subject: ${subject}
 Existing Status: ${existingApp?.status || "None"}
 
-Thread Transcript:
-${threadTranscript.slice(0, 5000)}`;
+CRITICAL STATUS CLASSIFICATION RULES (BASED ON THE LATEST STATE):
+- 'RFI_ACTION_REQUIRED':
+  CHOOSE THIS whenever the SIRIM officer, e-ComM officer, or testing lab is requesting technical documents, reports, or clarifications. This includes:
+  * RF test reports, EMC test reports, Safety test reports (MS IEC 62368-1), SAR reports.
+  * Product schematics, PCB layout, block diagram, technical specifications, user manual, datasheet.
+  * Declaration of Conformity (DoC), Letter of Authorization, brand authorization.
+  * Exterior/interior product photos, marking/label artwork, rating plate drawings.
+  * Any written clarifications, answers to officer queries, or amendments.
+  IMPORTANT: Even if an invoice number, quotation, or processing fee is mentioned in the thread or in a quotation table, IF SIRIM IS REQUESTING TECHNICAL DOCUMENTS OR TEST REPORTS, THE STATUS MUST BE 'RFI_ACTION_REQUIRED' (NOT 'PAYMENT_PENDING')!
+
+- 'PAYMENT_PENDING':
+  ONLY choose this if paying an outstanding invoice/fee or uploading payment receipt is the EXCLUSIVE or PRIMARY pending action, and SIRIM is NOT waiting for technical documents or test reports.
+
+- 'UNDER_REVIEW':
+  Choose this if the application is undergoing initial technical review, OR if the applicant (Cytron) already responded to the previous RFI by sending the requested documents and is waiting for officer review.
+
+- 'SAMPLE_REQUESTED':
+  SIRIM has issued a call notice requesting physical hardware test samples to be delivered/couriered to SIRIM QAS Lab (Building 25, Shah Alam).
+
+- 'SAMPLE_SUBMITTED':
+  The applicant has dispatched the physical samples and provided courier tracking consignment info.
+
+- 'TESTING_IN_PROGRESS':
+  SIRIM QAS lab is actively conducting laboratory tests.
+
+- 'FINAL_EVALUATION':
+  Testing and document evaluation completed; queued for final approval review.
+
+- 'APPROVED':
+  SIRIM QAS has approved the application or issued the Certificate of Conformity (CoC) / Type Approval.
+
+Thread Transcript (${messages.length} messages):
+${threadTranscript.slice(0, 40000)}
+
+Return a JSON object with:
+isSirimRelated (boolean), applicationRef (string), productName (string), modelNumber (string), brand (string), applicant (string), scheme (string), status (string: 'SUBMITTED'|'UNDER_REVIEW'|'SAMPLE_REQUESTED'|'SAMPLE_SUBMITTED'|'TESTING_IN_PROGRESS'|'RFI_ACTION_REQUIRED'|'PAYMENT_PENDING'|'FINAL_EVALUATION'|'APPROVED'|'REJECTED'|'EXPIRED'), statusExplanation (string), officerName (string), officerEmail (string), processingFeeRm (number), detectedStandards (array of strings), courierTracking (string), quotationOrInvoiceNo (string), summary (string), timelineEvents (array of {date, title, description, sender, type: 'status_change'|'rfi'|'document'|'payment'|'approval'|'sample'})`;
 
                 const aiRes = await generateContentWithRetryAndFallback(
                   ai,
-                  "gemini-3.7-flash",
+                  "gemini-3.8-flash",
                   prompt,
                   {
                     responseMimeType: "application/json",
@@ -1700,25 +2102,22 @@ ${threadTranscript.slice(0, 5000)}`;
                   const mHeaders = m.payload?.headers || [];
                   const mSub = mHeaders.find((h: any) => h.name?.toLowerCase() === "subject")?.value || subject;
                   const mFrom = mHeaders.find((h: any) => h.name?.toLowerCase() === "from")?.value || from;
+                  const mTo = mHeaders.find((h: any) => h.name?.toLowerCase() === "to")?.value || "";
                   const mDate = mHeaders.find((h: any) => h.name?.toLowerCase() === "date")?.value || lastDate;
-                  let bodyText = m.snippet || "";
-                  if (m.payload?.parts) {
-                    for (const part of m.payload.parts) {
-                      if (part.mimeType === "text/plain" && part.body?.data) {
-                        bodyText = Buffer.from(part.body.data, "base64").toString("utf-8");
-                        break;
-                      }
-                    }
-                  }
+                  const extracted = extractEmailBodyText(m.payload);
+                  const bodyText = extracted.trim().length > 0 ? extracted : (m.snippet || "");
+                  const att = extractAttachments(m.payload);
                   return {
                     id: m.id || `msg-${Date.now()}-${Math.random()}`,
                     messageId: m.id || "",
                     from: mFrom,
-                    to: "applicant@cytron.io",
+                    to: mTo || "applicant@cytron.io",
                     date: mDate,
                     subject: mSub,
-                    snippet: m.snippet || "",
+                    snippet: m.snippet || bodyText.slice(0, 120),
                     bodyText,
+                    hasAttachments: att.hasAttachments,
+                    attachmentNames: att.attachmentNames,
                   };
                 });
 

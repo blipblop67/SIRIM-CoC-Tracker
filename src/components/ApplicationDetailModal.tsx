@@ -23,6 +23,7 @@ import {
   ExternalLink,
   MessageSquare,
   Trash2,
+  Building2,
 } from 'lucide-react';
 import confetti from 'canvas-confetti';
 import {
@@ -40,6 +41,8 @@ import {
   calculateDeadlineInfo,
   formatDate,
   getGmailThreadUrl,
+  getSupplierStatusBadgeInfo,
+  getAssigneeBadgeInfo,
 } from '../utils/formatters';
 import { notificationAudio } from '../utils/audio';
 
@@ -76,7 +79,19 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({
   const [newActionDueDate, setNewActionDueDate] = useState('');
 
   // AI Reply Generator state
-  const [replyIntent, setReplyIntent] = useState<string>('SUBMIT_DOCS');
+  const [recipientType, setRecipientType] = useState<'SIRIM' | 'SUPPLIER'>(
+    application.actionItems.some((a) => !a.isCompleted && a.assignedTo === 'SUPPLIER') ||
+    application.supplierStatus === 'WAITING_FOR_SUPPLIER_DOCS'
+      ? 'SUPPLIER'
+      : 'SIRIM'
+  );
+  const [targetSupplierName, setTargetSupplierName] = useState(application.supplierName || '');
+  const [targetSupplierEmail, setTargetSupplierEmail] = useState(application.supplierEmail || '');
+  const [replyIntent, setReplyIntent] = useState<string>(
+    application.actionItems.some((a) => !a.isCompleted && a.assignedTo === 'SUPPLIER')
+      ? 'REQUEST_SUPPLIER_DOCS'
+      : 'SUBMIT_DOCS'
+  );
   const [replyCustomNotes, setReplyCustomNotes] = useState('');
   const [isGeneratingReply, setIsGeneratingReply] = useState(false);
   const [generatedDraft, setGeneratedDraft] = useState<{
@@ -194,6 +209,9 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({
           productName: application.productName,
           modelNumber: application.modelNumber,
           officerName: application.officerName || 'Officer in charge',
+          recipientType,
+          supplierName: targetSupplierName,
+          supplierEmail: targetSupplierEmail,
           responseIntent: replyIntent,
           customNotes: replyCustomNotes,
           actionItemDetails: pendingItems,
@@ -256,6 +274,19 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({
               <span>Brand: <strong>{application.brand}</strong></span>
               <span>•</span>
               <span>Applicant: <strong>{application.applicant}</strong></span>
+              {(application.supplierName || (application.supplierStatus && application.supplierStatus !== 'NOT_INVOLVED')) && (
+                <>
+                  <span>•</span>
+                  <span className="flex items-center gap-1 text-purple-300">
+                    <Building2 className="w-3.5 h-3.5" />
+                    Supplier: <strong className="text-white">{application.supplierName || 'Hardware ODM'}</strong>
+                    {(() => {
+                      const sb = getSupplierStatusBadgeInfo(application.supplierStatus);
+                      return sb ? <span className="ml-1 text-[10px] bg-purple-900/90 text-purple-200 px-1.5 py-0.2 rounded border border-purple-700">{sb.shortLabel}</span> : null;
+                    })()}
+                  </span>
+                </>
+              )}
             </div>
           </div>
 
@@ -458,6 +489,7 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({
                         className="w-full text-xs px-2 py-1.5 border border-slate-300 rounded-lg bg-white"
                       >
                         <option value="APPLICANT">Cytron / Applicant</option>
+                        <option value="SUPPLIER">Hardware Supplier / ODM</option>
                         <option value="SIRIM">SIRIM QAS Officer</option>
                         <option value="LAB">Test Lab</option>
                       </select>
@@ -556,13 +588,14 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({
                               >
                                 {action.priority}
                               </span>
-                              <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-slate-100 text-slate-700 border border-slate-200">
-                                {action.assignedTo === 'APPLICANT'
-                                  ? 'Cytron Action'
-                                  : action.assignedTo === 'SIRIM'
-                                  ? 'SIRIM Action'
-                                  : 'Lab Action'}
-                              </span>
+                              {(() => {
+                                const aInfo = getAssigneeBadgeInfo(action.assignedTo);
+                                return (
+                                  <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded border ${aInfo.bg} ${aInfo.text} ${aInfo.border}`}>
+                                    {aInfo.label}
+                                  </span>
+                                );
+                              })()}
                             </div>
                           </div>
 
@@ -716,10 +749,31 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({
                         className="p-4 cursor-pointer hover:bg-slate-50/80 transition-colors flex items-start justify-between gap-3"
                       >
                         <div className="space-y-1 min-w-0">
-                          <div className="flex items-center gap-2">
+                          <div className="flex items-center gap-2 flex-wrap">
                             <span className="text-xs font-bold text-slate-900 truncate">
                               {email.from}
                             </span>
+                            {email.senderRole && email.senderRole !== 'UNKNOWN' && (
+                              <span
+                                className={`text-[10px] font-semibold px-1.5 py-0.2 rounded border ${
+                                  email.senderRole === 'SUPPLIER'
+                                    ? 'bg-purple-100 text-purple-800 border-purple-200'
+                                    : email.senderRole === 'SIRIM_OFFICER'
+                                    ? 'bg-blue-100 text-blue-800 border-blue-200'
+                                    : email.senderRole === 'APPLICANT'
+                                    ? 'bg-indigo-100 text-indigo-800 border-indigo-200'
+                                    : 'bg-amber-100 text-amber-800 border-amber-200'
+                                }`}
+                              >
+                                {email.senderRole === 'SUPPLIER'
+                                  ? 'Supplier / ODM'
+                                  : email.senderRole === 'SIRIM_OFFICER'
+                                  ? 'SIRIM QAS'
+                                  : email.senderRole === 'APPLICANT'
+                                  ? 'Applicant'
+                                  : 'Test Lab'}
+                              </span>
+                            )}
                             <span className="text-[10px] text-slate-400">→</span>
                             <span className="text-xs text-slate-600 truncate">{email.to}</span>
                           </div>
@@ -791,54 +845,138 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({
               <div>
                 <h4 className="text-sm font-bold text-slate-900 flex items-center gap-1.5">
                   <Sparkles className="w-4 h-4 text-blue-600" />
-                  Gemini AI Official SIRIM Reply Drafter
+                  Gemini AI Official Communications Drafter
                 </h4>
                 <p className="text-xs text-slate-500">
-                  Generates technical, formal, and polite email correspondence tailored to SIRIM QAS & e-ComM standards.
+                  Generate polite, technical, and regulatory-compliant emails for either SIRIM QAS Officers or Hardware Suppliers / ODMs.
                 </p>
               </div>
 
-              <div className="bg-white border border-slate-200 rounded-xl p-4 space-y-3 shadow-xs">
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  <div>
-                    <label className="text-xs font-bold text-slate-700 block mb-1">
-                      Response Intent / Goal
-                    </label>
-                    <select
-                      value={replyIntent}
-                      onChange={(e) => setReplyIntent(e.target.value)}
-                      className="w-full text-xs px-3 py-2 border border-slate-300 rounded-lg bg-white focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500"
-                    >
-                      <option value="SUBMIT_DOCS">Submit Requested Documents / Test Annex</option>
-                      <option value="REQUEST_EXTENSION">Request SLA Extension (7 / 14 Days)</option>
-                      <option value="STATUS_FOLLOWUP">Polite Status Follow-up / Panel Inquest</option>
-                      <option value="SAMPLE_TRACKING">Provide Courier Tracking & Test Sample Guide</option>
-                      <option value="PAYMENT_PROOF">Submit Payment Proof / FPX Receipt</option>
-                      <option value="CUSTOM">Custom Regulatory Query</option>
-                    </select>
-                  </div>
+              {/* Recipient Target Toggle */}
+              <div className="flex items-center gap-2 p-1 bg-slate-200/80 rounded-lg max-w-md">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setRecipientType('SIRIM');
+                    setReplyIntent('SUBMIT_DOCS');
+                  }}
+                  className={`flex-1 py-1.5 px-3 text-xs font-bold rounded-md transition-all ${
+                    recipientType === 'SIRIM'
+                      ? 'bg-white text-blue-700 shadow-xs'
+                      : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                >
+                  Draft to SIRIM Officer
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setRecipientType('SUPPLIER');
+                    setReplyIntent('REQUEST_SUPPLIER_DOCS');
+                  }}
+                  className={`flex-1 py-1.5 px-3 text-xs font-bold rounded-md transition-all flex items-center justify-center gap-1 ${
+                    recipientType === 'SUPPLIER'
+                      ? 'bg-purple-600 text-white shadow-xs'
+                      : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                >
+                  <Building2 className="w-3.5 h-3.5" />
+                  <span>Draft to Hardware Supplier</span>
+                </button>
+              </div>
 
-                  <div>
-                    <label className="text-xs font-bold text-slate-700 block mb-1">
-                      Target Officer
-                    </label>
-                    <input
-                      type="text"
-                      defaultValue={application.officerName || 'SIRIM QAS Certification Section'}
-                      className="w-full text-xs px-3 py-2 border border-slate-300 rounded-lg bg-slate-50"
-                    />
+              <div className="bg-white border border-slate-200 rounded-xl p-4 space-y-3 shadow-xs">
+                {recipientType === 'SIRIM' ? (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <label className="text-xs font-bold text-slate-700 block mb-1">
+                        SIRIM Response Intent
+                      </label>
+                      <select
+                        value={replyIntent}
+                        onChange={(e) => setReplyIntent(e.target.value)}
+                        className="w-full text-xs px-3 py-2 border border-slate-300 rounded-lg bg-white focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500"
+                      >
+                        <option value="SUBMIT_DOCS">Submit Requested Documents / Test Annex</option>
+                        <option value="REQUEST_EXTENSION">Request SLA Extension (7 / 14 Days)</option>
+                        <option value="STATUS_FOLLOWUP">Polite Status Follow-up / Panel Inquest</option>
+                        <option value="SAMPLE_TRACKING">Provide Courier Tracking & Test Sample Guide</option>
+                        <option value="PAYMENT_PROOF">Submit Payment Proof / FPX Receipt</option>
+                        <option value="CUSTOM">Custom Regulatory Query</option>
+                      </select>
+                    </div>
+
+                    <div>
+                      <label className="text-xs font-bold text-slate-700 block mb-1">
+                        Target SIRIM Officer
+                      </label>
+                      <input
+                        type="text"
+                        defaultValue={application.officerName || 'SIRIM QAS Certification Section'}
+                        className="w-full text-xs px-3 py-2 border border-slate-300 rounded-lg bg-slate-50"
+                      />
+                    </div>
                   </div>
-                </div>
+                ) : (
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                    <div>
+                      <label className="text-xs font-bold text-slate-700 block mb-1">
+                        Supplier Action Request
+                      </label>
+                      <select
+                        value={replyIntent}
+                        onChange={(e) => setReplyIntent(e.target.value)}
+                        className="w-full text-xs px-3 py-2 border border-purple-300 rounded-lg bg-white focus:ring-2 focus:ring-purple-500/20 focus:border-purple-500"
+                      >
+                        <option value="REQUEST_SUPPLIER_DOCS">Request Test Reports / Schematic / DoC</option>
+                        <option value="FOLLOWUP_URGENT_DOCS">Urgent: SIRIM Deadline Approaching</option>
+                        <option value="CLARIFY_SPEC">Clarify RF Spec / Antenna Gain / Lab Accreditation</option>
+                        <option value="CONFIRM_DOCS_RECEIVED">Confirm Receipt & Lodged with SIRIM</option>
+                        <option value="CUSTOM">Custom Supplier Inquiry</option>
+                      </select>
+                    </div>
+
+                    <div>
+                      <label className="text-xs font-bold text-slate-700 block mb-1">
+                        Supplier / ODM Company
+                      </label>
+                      <input
+                        type="text"
+                        value={targetSupplierName}
+                        onChange={(e) => setTargetSupplierName(e.target.value)}
+                        placeholder="e.g. Shenzhen Espressif Tech"
+                        className="w-full text-xs px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-purple-500/20 focus:border-purple-500"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="text-xs font-bold text-slate-700 block mb-1">
+                        Supplier Contact Email
+                      </label>
+                      <input
+                        type="email"
+                        value={targetSupplierEmail}
+                        onChange={(e) => setTargetSupplierEmail(e.target.value)}
+                        placeholder="e.g. export@supplier.com"
+                        className="w-full text-xs px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-purple-500/20 focus:border-purple-500"
+                      />
+                    </div>
+                  </div>
+                )}
 
                 <div>
                   <label className="text-xs font-bold text-slate-700 block mb-1">
-                    Specific Notes / Instructions for AI
+                    Specific Notes / Instructions for AI ({recipientType === 'SUPPLIER' ? 'to supplier' : 'to SIRIM'})
                   </label>
                   <textarea
                     rows={2}
                     value={replyCustomNotes}
                     onChange={(e) => setReplyCustomNotes(e.target.value)}
-                    placeholder="E.g. Mention that revised ETSI EN 300 328 laboratory accreditation annex and peak antenna gain certificate are attached..."
+                    placeholder={
+                      recipientType === 'SUPPLIER'
+                        ? 'E.g. Ask for unredacted ETSI EN 300 328 test report with ILAC-MRA stamp, and antenna peak gain statement...'
+                        : 'E.g. Mention that revised ETSI EN 300 328 laboratory accreditation annex and peak antenna gain certificate are attached...'
+                    }
                     className="w-full text-xs px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500"
                   />
                 </div>
@@ -982,6 +1120,58 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({
                       <span className="font-medium text-slate-800">
                         {application.officerName || 'Not Assigned'}
                       </span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Hardware Supplier & ODM Section */}
+                <div className="bg-white border border-slate-200 rounded-xl p-4 space-y-3 shadow-xs">
+                  <h4 className="text-xs font-bold text-slate-900 uppercase tracking-wider flex items-center gap-1.5">
+                    <Building2 className="w-4 h-4 text-purple-600" />
+                    Hardware Supplier / ODM Collaboration
+                  </h4>
+                  <div className="space-y-2 text-xs">
+                    <div className="flex justify-between items-center py-1 border-b border-slate-100">
+                      <span className="text-slate-500">Supplier Company</span>
+                      <span className="font-semibold text-slate-800">
+                        {application.supplierName || 'Not recorded yet'}
+                      </span>
+                    </div>
+                    <div className="flex justify-between items-center py-1 border-b border-slate-100">
+                      <span className="text-slate-500">Supplier Email</span>
+                      <span className="font-mono text-slate-700">
+                        {application.supplierEmail || 'No contact email'}
+                      </span>
+                    </div>
+                    <div className="flex justify-between items-center py-1 border-b border-slate-100">
+                      <span className="text-slate-500">Document Status</span>
+                      <div className="flex items-center gap-2">
+                        {(() => {
+                          const sInfo = getSupplierStatusBadgeInfo(application.supplierStatus);
+                          if (!sInfo) return <span className="text-slate-400">Not Involved</span>;
+                          return (
+                            <span className={`text-[11px] font-semibold px-2 py-0.5 rounded border ${sInfo.bg} ${sInfo.text} ${sInfo.border}`}>
+                              {sInfo.label}
+                            </span>
+                          );
+                        })()}
+                        <select
+                          value={application.supplierStatus || 'NOT_INVOLVED'}
+                          onChange={(e) => {
+                            onUpdateApplication({
+                              ...application,
+                              supplierStatus: e.target.value as any,
+                            });
+                          }}
+                          className="text-[11px] px-2 py-1 border border-slate-200 rounded bg-slate-50 text-slate-700 font-medium"
+                        >
+                          <option value="NOT_INVOLVED">Not Involved</option>
+                          <option value="WAITING_FOR_SUPPLIER_DOCS">Waiting for Supplier Docs</option>
+                          <option value="DOCUMENTS_RECEIVED_FROM_SUPPLIER">Documents Received</option>
+                          <option value="SUPPLIER_CLARIFICATION_REQUIRED">Clarification Required</option>
+                          <option value="ALL_SUPPLIER_DOCS_COMPLETE">All Complete</option>
+                        </select>
+                      </div>
                     </div>
                   </div>
                 </div>
