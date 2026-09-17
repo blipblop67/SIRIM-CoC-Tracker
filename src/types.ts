@@ -69,6 +69,46 @@ export interface EmailMessage {
   senderRole?: 'SIRIM' | 'APPLICANT' | 'SUPPLIER' | 'LAB' | 'OTHER';
 }
 
+export type DocumentChecklistStatus =
+  | 'NOT_STARTED'
+  | 'REQUESTED_FROM_SUPPLIER'
+  | 'RECEIVED_FROM_SUPPLIER'
+  | 'SUBMITTED_TO_SIRIM'
+  | 'APPROVED_BY_SIRIM'
+  | 'REJECTED';
+
+export interface DocumentChecklistItem {
+  id: string;
+  name: string;
+  category: 'TECHNICAL' | 'LEGAL_ADMIN' | 'TEST_REPORT' | 'LABELING';
+  description: string;
+  requiredForSchemes: CertificationScheme[];
+  status: DocumentChecklistStatus;
+  fileNotes?: string;
+  updatedAt?: string;
+}
+
+export interface DocumentPreScreenIssue {
+  severity: 'CRITICAL' | 'WARNING' | 'INFO';
+  issue: string;
+  malaysianStandardRef: string;
+  recommendation: string;
+}
+
+export interface DocumentPreScreenResult {
+  documentName: string;
+  documentType: string;
+  overallVerdict: 'COMPLIANT' | 'RISK_OF_REJECTION' | 'INSUFFICIENT_DATA';
+  score: number;
+  summary: string;
+  issues: DocumentPreScreenIssue[];
+  passedChecks: string[];
+  detectedStandards: string[];
+  detectedLabAccreditation?: string;
+  detectedFrequencies?: string[];
+  detectedPowerOutput?: string;
+}
+
 export interface SirimApplication {
   id: string;
   threadId: string;
@@ -84,6 +124,10 @@ export interface SirimApplication {
   supplierName?: string;
   supplierEmail?: string;
   supplierStatus?: 'NOT_INVOLVED' | 'WAITING_FOR_SUPPLIER_DOCS' | 'DOCUMENTS_RECEIVED_FROM_SUPPLIER' | 'DOCUMENTS_SUBMITTED_TO_SIRIM';
+  supplierLastContactDate?: string;
+  supplierChaserDueDate?: string;
+  supplierChaserCount?: number;
+  documentChecklist?: DocumentChecklistItem[];
   submissionDate: string;
   lastActivityDate: string;
   targetDeadline?: string;

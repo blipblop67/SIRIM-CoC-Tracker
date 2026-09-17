@@ -37,6 +37,8 @@ import { GmailScannerModal } from './components/GmailScannerModal';
 import { NewApplicationModal } from './components/NewApplicationModal';
 import { NotificationDrawer } from './components/NotificationDrawer';
 import { AutomationModal } from './components/AutomationModal';
+import { DocumentPreScreenModal } from './components/DocumentPreScreenModal';
+import { exportApplicationsToCsv } from './utils/exportCsv';
 import {
   getStoredAuthSession,
   googleSignIn,
@@ -231,6 +233,7 @@ export default function App() {
   const [isNewAppModalOpen, setIsNewAppModalOpen] = useState(false);
   const [isNotificationDrawerOpen, setIsNotificationDrawerOpen] = useState(false);
   const [isAutomationModalOpen, setIsAutomationModalOpen] = useState(false);
+  const [isGlobalPreScreenOpen, setIsGlobalPreScreenOpen] = useState(false);
 
   // Sync and Automation Runner state
   const [isSyncingSheet, setIsSyncingSheet] = useState(false);
@@ -741,6 +744,25 @@ export default function App() {
     }
   };
 
+  // Export applications to CSV spreadsheet
+  const handleExportCsv = () => {
+    if (applications.length === 0) {
+      setSyncFeedback({
+        message: 'No applications available in tracker to export.',
+        type: 'error',
+      });
+      return;
+    }
+    const targetApps = filteredApplications.length > 0 ? filteredApplications : applications;
+    exportApplicationsToCsv(targetApps);
+    setSyncFeedback({
+      message: `Exported ${targetApps.length} applications to CSV spreadsheet!`,
+      type: 'success',
+    });
+    notificationAudio.playSuccessTone();
+    setTimeout(() => setSyncFeedback(null), 4000);
+  };
+
   // Filtered Applications
   const filteredApplications = useMemo(() => {
     return applications.filter((app) => {
@@ -823,6 +845,8 @@ export default function App() {
         onDisconnectGoogle={handleDisconnectGoogle}
         onManualSyncSheet={handleSyncToGoogleSheet}
         onClearAll={handleClearAllApplications}
+        onExportCsv={handleExportCsv}
+        onOpenPreScreen={() => setIsGlobalPreScreenOpen(true)}
         isSyncingSheet={isSyncingSheet}
         isRunningAutomation={isRunningAutomation}
       />
@@ -885,6 +909,7 @@ export default function App() {
               totalFilteredCount={filteredApplications.length}
               totalAppsCount={applications.length}
               onClearAll={handleClearAllApplications}
+              onExportCsv={handleExportCsv}
             />
           </>
         )}
@@ -1031,6 +1056,7 @@ export default function App() {
           onUpdateApplication={handleUpdateApplication}
           onDeleteApplication={handleDeleteApplication}
           initialTab={detailInitialTab}
+          accessToken={authSession?.accessToken}
         />
       )}
 
@@ -1087,6 +1113,44 @@ export default function App() {
           onRunAutomationNow={handleRunAutomationNow}
           isRunningAutomation={isRunningAutomation}
           onAddLog={handleAddAutomationLog}
+        />
+      )}
+
+      {/* Global AI Document Pre-Screening Scanner */}
+      {isGlobalPreScreenOpen && (
+        <DocumentPreScreenModal
+          isOpen={isGlobalPreScreenOpen}
+          onClose={() => setIsGlobalPreScreenOpen(false)}
+          application={selectedApplication || applications[0] || null}
+          onApplyResult={(result) => {
+            const targetApp = selectedApplication || applications[0];
+            if (targetApp) {
+              const now = new Date().toISOString();
+              const updatedApp: SirimApplication = {
+                ...targetApp,
+                timeline: [
+                  ...targetApp.timeline,
+                  {
+                    id: `prescreen-${Date.now()}`,
+                    date: now,
+                    title: `AI Pre-Screen: ${result.documentType}`,
+                    description: `Score: ${result.score}% (${result.overallVerdict}). ${result.summary.slice(0, 100)}...`,
+                    sender: 'Me (Compliance Audit)',
+                    type: 'status_change',
+                    senderRole: 'APPLICANT',
+                  },
+                ],
+                notes:
+                  (targetApp.notes ? targetApp.notes + '\n\n' : '') +
+                  `[AI Pre-Screen - ${result.documentType}]: ${result.overallVerdict} (${result.score}%). ${result.summary}`,
+              };
+              handleUpdateApplication(updatedApp);
+              setSyncFeedback({
+                message: `Applied pre-screen findings to ${targetApp.applicationRef}!`,
+                type: 'success',
+              });
+            }
+          }}
         />
       )}
     </div>

@@ -14,6 +14,8 @@ import {
   Zap,
   Send,
   Trash2,
+  Download,
+  FileCheck,
 } from 'lucide-react';
 import { AutomationConfig, SheetSyncConfig, UserAuthSession } from '../types';
 
@@ -33,6 +35,8 @@ interface HeaderProps {
   onDisconnectGoogle: () => void;
   onManualSyncSheet: () => void;
   onClearAll?: () => void;
+  onExportCsv?: () => void;
+  onOpenPreScreen?: () => void;
   isSyncingSheet: boolean;
   isRunningAutomation: boolean;
 }
@@ -53,6 +57,8 @@ export const Header: React.FC<HeaderProps> = ({
   onDisconnectGoogle,
   onManualSyncSheet,
   onClearAll,
+  onExportCsv,
+  onOpenPreScreen,
   isSyncingSheet,
   isRunningAutomation,
 }) => {
@@ -153,6 +159,29 @@ export const Header: React.FC<HeaderProps> = ({
             <Sparkles className="w-3.5 h-3.5 text-indigo-200" />
             <span className="hidden sm:inline">Ingest Email</span>
           </button>
+
+          {onOpenPreScreen && (
+            <button
+              onClick={onOpenPreScreen}
+              className="hidden lg:flex items-center gap-1.5 bg-slate-800 hover:bg-slate-700 px-3 py-1.5 rounded-lg text-xs font-medium border border-slate-700 transition-colors text-indigo-300 hover:text-indigo-200"
+              title="Pre-Screen compliance test report with AI"
+            >
+              <FileCheck className="w-3.5 h-3.5 text-indigo-400" />
+              <span>AI Pre-Screen</span>
+            </button>
+          )}
+
+          {onExportCsv && (
+            <button
+              onClick={onExportCsv}
+              className="hidden xl:flex items-center gap-1 text-xs text-slate-300 hover:text-white bg-slate-800 hover:bg-slate-700 border border-slate-700 px-2.5 py-1.5 rounded-lg transition-colors font-medium shadow-xs"
+              title="Export all applications to CSV"
+            >
+              <Download className="w-3.5 h-3.5 text-slate-400" />
+              <span>Export CSV</span>
+            </button>
+          )}
+
           {applicationsCount > 0 && onClearAll && (
             <button
               onClick={onClearAll}

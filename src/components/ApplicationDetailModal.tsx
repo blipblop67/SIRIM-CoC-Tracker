@@ -24,6 +24,8 @@ import {
   MessageSquare,
   Trash2,
   Building2,
+  AlertCircle,
+  Download,
 } from 'lucide-react';
 import confetti from 'canvas-confetti';
 import {
@@ -33,6 +35,10 @@ import {
   ActionAssignee,
   ActionItemType,
   SirimStatus,
+  DocumentChecklistItem,
+  DocumentChecklistStatus,
+  EmailMessage,
+  TimelineEvent,
 } from '../types';
 import {
   getStatusBadgeInfo,
@@ -45,6 +51,8 @@ import {
   getAssigneeBadgeInfo,
 } from '../utils/formatters';
 import { notificationAudio } from '../utils/audio';
+import { getDefaultChecklistForScheme } from '../utils/documentChecklistDefaults';
+import { DocumentPreScreenModal } from './DocumentPreScreenModal';
 
 interface ApplicationDetailModalProps {
   application: SirimApplication | null;
@@ -52,7 +60,8 @@ interface ApplicationDetailModalProps {
   onClose: () => void;
   onUpdateApplication: (updatedApp: SirimApplication) => void;
   onDeleteApplication?: (appId: string) => void;
-  initialTab?: 'actions' | 'timeline' | 'emails' | 'ai-reply' | 'dossier';
+  accessToken?: string;
+  initialTab?: 'actions' | 'checklist' | 'timeline' | 'emails' | 'ai-reply' | 'dossier';
 }
 
 export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({
@@ -61,13 +70,17 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({
   onClose,
   onUpdateApplication,
   onDeleteApplication,
+  accessToken,
   initialTab = 'actions',
 }) => {
   if (!isOpen || !application) return null;
 
-  const [activeTab, setActiveTab] = useState<'actions' | 'timeline' | 'emails' | 'ai-reply' | 'dossier'>(
+  const [activeTab, setActiveTab] = useState<'actions' | 'checklist' | 'timeline' | 'emails' | 'ai-reply' | 'dossier'>(
     initialTab
   );
+
+  // Pre-screen compliance scanner modal state
+  const [isPreScreenModalOpen, setIsPreScreenModalOpen] = useState(false);
 
   // New action item form state
   const [showAddAction, setShowAddAction] = useState(false);
@@ -101,6 +114,15 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({
   } | null>(null);
   const [copiedDraft, setCopiedDraft] = useState(false);
 
+  // Direct Gmail Actions state
+  const [isCreatingDraft, setIsCreatingDraft] = useState(false);
+  const [isSendingEmail, setIsSendingEmail] = useState(false);
+  const [gmailActionStatus, setGmailActionStatus] = useState<{
+    type: 'success' | 'error';
+    message: string;
+    link?: string;
+  } | null>(null);
+
   // Expanded email messages
   const [expandedEmailId, setExpandedEmailId] = useState<string | null>(
     application.emailThreads.length > 0 ? application.emailThreads[application.emailThreads.length - 1].id : null
@@ -108,6 +130,65 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({
 
   const statusInfo = getStatusBadgeInfo(application.status);
   const deadlineInfo = calculateDeadlineInfo(application.targetDeadline);
+
+  // Document Checklist computation
+  const documentChecklist: DocumentChecklistItem[] =
+    application.documentChecklist && application.documentChecklist.length > 0
+      ? application.documentChecklist
+      : getDefaultChecklistForScheme(application.scheme);
+
+  const checklistProgress = {
+    total: documentChecklist.length,
+    completed: documentChecklist.filter(
+      (d) => d.status === 'APPROVED_BY_SIRIM' || d.status === 'SUBMITTED_TO_SIRIM'
+    ).length,
+  };
+
+  const handleUpdateChecklistItem = (itemId: string, newStatus: DocumentChecklistStatus, fileNotes?: string) => {
+    const updatedList = documentChecklist.map((item) =>
+      item.id === itemId
+        ? {
+            ...item,
+            status: newStatus,
+            fileNotes: fileNotes !== undefined ? fileNotes : item.fileNotes,
+            updatedAt: new Date().toISOString(),
+          }
+        : item
+    );
+    onUpdateApplication({
+      ...application,
+      documentChecklist: updatedList,
+    });
+  };
+
+  // Supplier Follow-Up Chaser Cadence handler
+  const handleLogSupplierChaser = () => {
+    const today = new Date();
+    const nextDueDate = new Date(today.getTime() + 3 * 24 * 60 * 60 * 1000); // 3-day SLA follow-up
+    const todayStr = today.toISOString().split('T')[0];
+    const nextDueStr = nextDueDate.toISOString().split('T')[0];
+    const newCount = (application.supplierChaserCount || 0) + 1;
+
+    onUpdateApplication({
+      ...application,
+      supplierLastContactDate: todayStr,
+      supplierChaserDueDate: nextDueStr,
+      supplierChaserCount: newCount,
+      supplierStatus: 'WAITING_FOR_SUPPLIER_DOCS',
+      timeline: [
+        ...application.timeline,
+        {
+          id: `tl-chaser-${Date.now()}`,
+          timestamp: new Date().toISOString(),
+          title: `Supplier Follow-Up / Chaser #${newCount} Logged`,
+          description: `Follow-up logged for ${application.supplierName || 'Hardware Supplier'}. Next SLA check scheduled for ${nextDueStr}.`,
+          type: 'STATUS_CHANGE',
+          actor: 'Applicant',
+        },
+      ],
+    });
+    notificationAudio.playSuccessTone();
+  };
 
   // Step pipeline logic
   const stages = [
@@ -239,6 +320,146 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({
     navigator.clipboard.writeText(fullText);
     setCopiedDraft(true);
     setTimeout(() => setCopiedDraft(false), 2000);
+  };
+
+  const handleCreateGmailDraft = async () => {
+    if (!generatedDraft) return;
+    const targetEmail =
+      recipientType === 'SUPPLIER'
+        ? (targetSupplierEmail || application.supplierEmail || '')
+        : (application.officerEmail || 'cmcs@sirim.my');
+
+    if (!targetEmail) {
+      setGmailActionStatus({
+        type: 'error',
+        message: 'Please provide a valid recipient email address.',
+      });
+      return;
+    }
+
+    setIsCreatingDraft(true);
+    setGmailActionStatus(null);
+    try {
+      const res = await fetch('/api/gmail/create-draft', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
+        },
+        body: JSON.stringify({
+          to: targetEmail,
+          subject: generatedDraft.subject,
+          body: generatedDraft.body,
+          threadId: application.threadId,
+        }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        setGmailActionStatus({
+          type: 'success',
+          message: 'Draft successfully created in your Gmail inbox!',
+          link: data.gmailUrl,
+        });
+        notificationAudio.playSuccessTone();
+      } else {
+        throw new Error(data.details || data.error || 'Failed to create draft');
+      }
+    } catch (err: any) {
+      setGmailActionStatus({
+        type: 'error',
+        message: err?.message || 'Could not create draft in Gmail.',
+      });
+    } finally {
+      setIsCreatingDraft(false);
+    }
+  };
+
+  const handleSendGmailEmail = async () => {
+    if (!generatedDraft) return;
+    const targetEmail =
+      recipientType === 'SUPPLIER'
+        ? (targetSupplierEmail || application.supplierEmail || '')
+        : (application.officerEmail || 'cmcs@sirim.my');
+
+    if (!targetEmail) {
+      setGmailActionStatus({
+        type: 'error',
+        message: 'Please provide a valid recipient email address.',
+      });
+      return;
+    }
+
+    const confirmed = window.confirm(
+      `Send this official email directly to ${targetEmail} from your connected Gmail account?`
+    );
+    if (!confirmed) return;
+
+    setIsSendingEmail(true);
+    setGmailActionStatus(null);
+    try {
+      const res = await fetch('/api/gmail/send-email', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
+        },
+        body: JSON.stringify({
+          to: targetEmail,
+          subject: generatedDraft.subject,
+          body: generatedDraft.body,
+          threadId: application.threadId,
+        }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        setGmailActionStatus({
+          type: 'success',
+          message: `Official email sent to ${targetEmail}!`,
+        });
+        notificationAudio.playSuccessTone();
+
+        // Append to application timeline & email threads
+        const now = new Date().toISOString();
+        const newEmail: EmailMessage = {
+          id: `sent-${Date.now()}`,
+          messageId: `sent-${Date.now()}`,
+          from: 'Me (Applicant Compliance Lead)',
+          to: targetEmail,
+          date: now,
+          subject: generatedDraft.subject,
+          snippet: generatedDraft.body.slice(0, 120),
+          bodyText: generatedDraft.body,
+          hasAttachments: generatedDraft.suggestedAttachments.length > 0,
+          attachmentNames: generatedDraft.suggestedAttachments,
+          senderRole: 'APPLICANT',
+        };
+        const newTimeline: TimelineEvent = {
+          id: `tl-${Date.now()}`,
+          date: now,
+          title: `Official Email Sent: ${generatedDraft.subject}`,
+          description: `Dispatched via Gmail to ${targetEmail}`,
+          sender: 'Me (Compliance)',
+          type: 'status_change',
+          senderRole: 'APPLICANT',
+        };
+
+        onUpdateApplication({
+          ...application,
+          emailThreads: [...application.emailThreads, newEmail],
+          timeline: [...application.timeline, newTimeline],
+          lastActivityDate: now.split('T')[0],
+        });
+      } else {
+        throw new Error(data.details || data.error || 'Failed to send email');
+      }
+    } catch (err: any) {
+      setGmailActionStatus({
+        type: 'error',
+        message: err?.message || 'Could not send email via Gmail.',
+      });
+    } finally {
+      setIsSendingEmail(false);
+    }
   };
 
   return (
@@ -375,6 +596,21 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({
             <span>Action Items</span>
             <span className="ml-1 px-1.5 py-0.2 rounded-full text-[10px] bg-slate-100 text-slate-700">
               {application.actionItems.filter((a) => !a.isCompleted).length}
+            </span>
+          </button>
+
+          <button
+            onClick={() => setActiveTab('checklist')}
+            className={`flex items-center gap-1.5 py-3 px-3 border-b-2 text-xs font-semibold transition-colors whitespace-nowrap ${
+              activeTab === 'checklist'
+                ? 'border-blue-600 text-blue-600'
+                : 'border-transparent text-slate-600 hover:text-slate-900'
+            }`}
+          >
+            <FileCheck className="w-4 h-4 text-emerald-600" />
+            <span>Scheme Checklist</span>
+            <span className="ml-1 px-1.5 py-0.2 rounded-full text-[10px] bg-emerald-100 text-emerald-800 font-bold">
+              {checklistProgress.completed}/{checklistProgress.total}
             </span>
           </button>
 
@@ -642,6 +878,127 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({
                     </div>
                   );
                 })}
+              </div>
+            </div>
+          )}
+
+          {/* TAB: SCHEME CHECKLIST */}
+          {activeTab === 'checklist' && (
+            <div className="space-y-4">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-white p-4 rounded-xl border border-slate-200 shadow-xs">
+                <div>
+                  <div className="flex items-center gap-2">
+                    <h4 className="text-sm font-bold text-slate-900">
+                      {application.scheme} Dossier Checklist
+                    </h4>
+                    <span className="text-xs px-2.5 py-0.5 rounded-full bg-emerald-100 text-emerald-800 font-bold border border-emerald-200">
+                      {checklistProgress.completed} of {checklistProgress.total} Ready ({Math.round((checklistProgress.completed / (checklistProgress.total || 1)) * 100)}%)
+                    </span>
+                  </div>
+                  <p className="text-xs text-slate-500 mt-0.5">
+                    Malaysian SIRIM QAS / MCMC mandatory compliance artifacts for this scheme.
+                  </p>
+                </div>
+
+                <button
+                  onClick={() => setIsPreScreenModalOpen(true)}
+                  className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold shadow-xs transition-colors shrink-0"
+                >
+                  <Sparkles className="w-3.5 h-3.5 text-indigo-200" />
+                  <span>Pre-Screen Test Report (AI)</span>
+                </button>
+              </div>
+
+              {/* Progress bar */}
+              <div className="w-full bg-slate-200 h-2.5 rounded-full overflow-hidden">
+                <div
+                  className="bg-emerald-500 h-full transition-all duration-300"
+                  style={{
+                    width: `${Math.round((checklistProgress.completed / (checklistProgress.total || 1)) * 100)}%`,
+                  }}
+                />
+              </div>
+
+              {/* Document Cards */}
+              <div className="space-y-2.5">
+                {documentChecklist.map((item) => (
+                  <div
+                    key={item.id}
+                    className={`p-3.5 bg-white border rounded-xl transition-all shadow-xs flex flex-col sm:flex-row sm:items-center justify-between gap-3 ${
+                      item.status === 'APPROVED_BY_SIRIM'
+                        ? 'border-emerald-200 bg-emerald-50/20'
+                        : item.status === 'REJECTED'
+                        ? 'border-rose-200 bg-rose-50/20'
+                        : item.status === 'REQUESTED_FROM_SUPPLIER'
+                        ? 'border-purple-200 bg-purple-50/20'
+                        : 'border-slate-200'
+                    }`}
+                  >
+                    <div className="space-y-1 min-w-0 flex-1">
+                      <div className="flex items-center gap-2">
+                        <span
+                          className={`text-[10px] font-bold px-1.5 py-0.5 rounded uppercase tracking-wider ${
+                            item.category === 'TEST_REPORT'
+                              ? 'bg-blue-100 text-blue-800'
+                              : item.category === 'TECHNICAL'
+                              ? 'bg-slate-100 text-slate-800'
+                              : item.category === 'LEGAL_ADMIN'
+                              ? 'bg-purple-100 text-purple-800'
+                              : 'bg-amber-100 text-amber-800'
+                          }`}
+                        >
+                          {item.category.replace('_', ' ')}
+                        </span>
+                        <span className="text-xs font-bold text-slate-900">{item.name}</span>
+                        {item.requiredForSchemes?.includes(application.scheme) && (
+                          <span className="text-[10px] font-bold text-rose-600 bg-rose-50 px-1 py-0.2 rounded border border-rose-200">
+                            Required
+                          </span>
+                        )}
+                      </div>
+                      <p className="text-xs text-slate-600 leading-normal">{item.description}</p>
+                    </div>
+
+                    <div className="flex items-center gap-2 shrink-0">
+                      <select
+                        value={item.status}
+                        onChange={(e) =>
+                          handleUpdateChecklistItem(item.id, e.target.value as DocumentChecklistStatus)
+                        }
+                        className={`text-xs font-semibold px-2.5 py-1.5 rounded-lg border focus:ring-2 focus:ring-indigo-500/20 ${
+                          item.status === 'APPROVED_BY_SIRIM'
+                            ? 'bg-emerald-50 text-emerald-800 border-emerald-300'
+                            : item.status === 'SUBMITTED_TO_SIRIM'
+                            ? 'bg-blue-50 text-blue-800 border-blue-300'
+                            : item.status === 'RECEIVED_FROM_SUPPLIER'
+                            ? 'bg-sky-50 text-sky-800 border-sky-300'
+                            : item.status === 'REQUESTED_FROM_SUPPLIER'
+                            ? 'bg-purple-50 text-purple-800 border-purple-300'
+                            : item.status === 'REJECTED'
+                            ? 'bg-rose-50 text-rose-800 border-rose-300'
+                            : 'bg-slate-50 text-slate-700 border-slate-300'
+                        }`}
+                      >
+                        <option value="NOT_STARTED">Not Started</option>
+                        <option value="REQUESTED_FROM_SUPPLIER">Requested from Supplier</option>
+                        <option value="RECEIVED_FROM_SUPPLIER">Received from Supplier</option>
+                        <option value="SUBMITTED_TO_SIRIM">Submitted to SIRIM</option>
+                        <option value="APPROVED_BY_SIRIM">Approved by SIRIM QAS</option>
+                        <option value="REJECTED">Query / Rejected</option>
+                      </select>
+
+                      {item.category === 'TEST_REPORT' && (
+                        <button
+                          onClick={() => setIsPreScreenModalOpen(true)}
+                          className="p-1.5 text-slate-500 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg transition-colors border border-slate-200"
+                          title="Pre-Screen this test report with AI Scanner"
+                        >
+                          <Sparkles className="w-4 h-4 text-indigo-500" />
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                ))}
               </div>
             </div>
           )}
@@ -1051,6 +1408,71 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({
                       </div>
                     </div>
                   )}
+
+                  {/* Gmail Integration Actions */}
+                  <div className="flex flex-wrap items-center gap-2 pt-3 border-t border-slate-100">
+                    <button
+                      onClick={handleCreateGmailDraft}
+                      disabled={isCreatingDraft || isSendingEmail}
+                      className="flex items-center gap-1.5 px-3.5 py-2 text-xs font-bold text-slate-800 bg-slate-100 hover:bg-slate-200 border border-slate-300 rounded-lg transition-colors cursor-pointer disabled:opacity-50"
+                      title="Create this draft directly in your connected Gmail inbox"
+                    >
+                      <Mail className="w-3.5 h-3.5 text-sky-600" />
+                      <span>{isCreatingDraft ? 'Creating Draft in Gmail...' : 'Create Draft in Gmail'}</span>
+                    </button>
+
+                    <button
+                      onClick={handleSendGmailEmail}
+                      disabled={isCreatingDraft || isSendingEmail}
+                      className="flex items-center gap-1.5 px-3.5 py-2 text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-700 rounded-lg transition-colors cursor-pointer shadow-xs disabled:opacity-50"
+                      title="Send email immediately via your connected Gmail account"
+                    >
+                      <Send className="w-3.5 h-3.5" />
+                      <span>{isSendingEmail ? 'Sending via Gmail...' : 'Send Official Email Now'}</span>
+                    </button>
+
+                    <a
+                      href={
+                        application.gmailThreadLink ||
+                        `https://mail.google.com/mail/u/0/#search/${encodeURIComponent(application.applicationRef)}`
+                      }
+                      target="_blank"
+                      rel="noreferrer"
+                      className="flex items-center gap-1 px-3 py-2 text-xs font-semibold text-slate-600 hover:text-slate-900 transition-colors ml-auto"
+                    >
+                      <ExternalLink className="w-3.5 h-3.5" />
+                      <span>Open Thread in Gmail</span>
+                    </a>
+                  </div>
+
+                  {gmailActionStatus && (
+                    <div
+                      className={`p-3 rounded-xl border text-xs flex items-center justify-between gap-2 ${
+                        gmailActionStatus.type === 'success'
+                          ? 'bg-emerald-50 text-emerald-900 border-emerald-200'
+                          : 'bg-rose-50 text-rose-900 border-rose-200'
+                      }`}
+                    >
+                      <div className="flex items-center gap-2">
+                        {gmailActionStatus.type === 'success' ? (
+                          <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                        ) : (
+                          <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
+                        )}
+                        <span className="font-semibold">{gmailActionStatus.message}</span>
+                      </div>
+                      {gmailActionStatus.link && (
+                        <a
+                          href={gmailActionStatus.link}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="px-2.5 py-1 bg-emerald-600 text-white rounded font-bold hover:bg-emerald-700 transition-colors shrink-0 flex items-center gap-1"
+                        >
+                          <span>Open in Gmail ↗</span>
+                        </a>
+                      )}
+                    </div>
+                  )}
                 </div>
               )}
             </div>
@@ -1087,6 +1509,67 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({
                           : '-'}
                       </span>
                     </div>
+
+                    {/* Renewal Watchdog Status */}
+                    {application.certificateExpiryDate && (() => {
+                      const exp = new Date(application.certificateExpiryDate);
+                      const now = new Date();
+                      const diffDays = Math.ceil((exp.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
+                      const isExpired = diffDays < 0;
+                      const isDueSoon = diffDays >= 0 && diffDays <= 90;
+
+                      return (
+                        <div
+                          className={`p-2.5 rounded-lg border flex items-center justify-between gap-2 mt-2 ${
+                            isExpired
+                              ? 'bg-rose-50 border-rose-200 text-rose-900'
+                              : isDueSoon
+                              ? 'bg-amber-50 border-amber-200 text-amber-900'
+                              : 'bg-emerald-50 border-emerald-200 text-emerald-900'
+                          }`}
+                        >
+                          <div className="flex items-center gap-1.5">
+                            {isExpired ? (
+                              <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
+                            ) : isDueSoon ? (
+                              <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+                            ) : (
+                              <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                            )}
+                            <div>
+                              <div className="font-bold text-[11px]">
+                                {isExpired
+                                  ? 'CoC Expired'
+                                  : isDueSoon
+                                  ? `Renewal Due in ${diffDays} days`
+                                  : `CoC Active (${diffDays} days remaining)`}
+                              </div>
+                              <div className="text-[10px] text-slate-600">
+                                {isDueSoon
+                                  ? 'SIRIM requires renewal lodgement ≥ 60 days before expiry.'
+                                  : isExpired
+                                  ? 'Re-certification or renewal submission required.'
+                                  : 'Compliant with Malaysian regulatory standards.'}
+                              </div>
+                            </div>
+                          </div>
+
+                          {(isDueSoon || isExpired) && (
+                            <button
+                              onClick={() => {
+                                setActiveTab('ai-reply');
+                                setRecipientType('SIRIM');
+                                setReplyIntent('SUBMIT_DOCS');
+                                setReplyCustomNotes(`Drafting renewal application for Certificate No: ${application.certificateNo}`);
+                              }}
+                              className="px-2.5 py-1 text-[10px] font-bold bg-white hover:bg-slate-50 border border-slate-300 rounded shadow-2xs text-slate-800 transition-colors shrink-0"
+                            >
+                              Draft Renewal
+                            </button>
+                          )}
+                        </div>
+                      );
+                    })()}
                   </div>
                 </div>
 
@@ -1173,6 +1656,61 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({
                         </select>
                       </div>
                     </div>
+
+                    {/* Supplier Follow-up Cadence & Chaser SLA */}
+                    <div className="p-3 bg-purple-50/60 rounded-lg border border-purple-200 mt-2 space-y-2">
+                      <div className="flex items-center justify-between">
+                        <span className="font-bold text-[11px] text-purple-900 flex items-center gap-1">
+                          <Clock className="w-3.5 h-3.5 text-purple-600" />
+                          Supplier SLA & Chaser Cadence
+                        </span>
+                        <span className="text-[10px] font-semibold bg-purple-100 text-purple-800 px-2 py-0.5 rounded-full border border-purple-200">
+                          {application.supplierChaserCount || 0} Chasers Sent
+                        </span>
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-2 text-[11px]">
+                        <div>
+                          <span className="text-slate-500 block text-[10px]">Last Contact:</span>
+                          <span className="font-semibold text-slate-800">
+                            {application.supplierLastContactDate
+                              ? formatDate(application.supplierLastContactDate)
+                              : 'No contact logged'}
+                          </span>
+                        </div>
+                        <div>
+                          <span className="text-slate-500 block text-[10px]">Next Follow-up Due:</span>
+                          <span className="font-semibold text-purple-900">
+                            {application.supplierChaserDueDate
+                              ? formatDate(application.supplierChaserDueDate)
+                              : 'None scheduled'}
+                          </span>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-2 pt-1 border-t border-purple-200/80">
+                        <button
+                          onClick={handleLogSupplierChaser}
+                          className="flex-1 px-2.5 py-1.5 bg-white hover:bg-purple-100/60 text-purple-800 border border-purple-300 rounded text-xs font-semibold transition-colors"
+                        >
+                          Log 3-Day Chaser
+                        </button>
+                        <button
+                          onClick={() => {
+                            setActiveTab('ai-reply');
+                            setRecipientType('SUPPLIER');
+                            setReplyIntent('REQUEST_SUPPLIER_DOCS');
+                            setReplyCustomNotes(
+                              `Follow-up chaser #${(application.supplierChaserCount || 0) + 1} for missing compliance test reports and documentation.`
+                            );
+                          }}
+                          className="flex-1 px-2.5 py-1.5 bg-purple-600 hover:bg-purple-700 text-white rounded text-xs font-bold shadow-xs transition-colors flex items-center justify-center gap-1"
+                        >
+                          <Sparkles className="w-3 h-3 text-purple-200" />
+                          <span>AI Chaser</span>
+                        </button>
+                      </div>
+                    </div>
                   </div>
                 </div>
               </div>
@@ -1203,6 +1741,32 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({
           </button>
         </div>
       </div>
+
+      {/* AI Document Pre-Screening Scanner Modal */}
+      <DocumentPreScreenModal
+        isOpen={isPreScreenModalOpen}
+        onClose={() => setIsPreScreenModalOpen(false)}
+        application={application}
+        onApplyResult={(result) => {
+          const now = new Date().toISOString();
+          const timelineEvent: TimelineEvent = {
+            id: `prescreen-${Date.now()}`,
+            date: now,
+            title: `AI Pre-Screen Audit: ${result.documentType}`,
+            description: `Verdict: ${result.overallVerdict} (${result.score}%). ${result.summary.slice(0, 120)}...`,
+            sender: 'Me (Compliance Audit)',
+            type: 'status_change',
+            senderRole: 'APPLICANT',
+          };
+          onUpdateApplication({
+            ...application,
+            timeline: [...application.timeline, timelineEvent],
+            notes:
+              (application.notes ? application.notes + '\n\n' : '') +
+              `[AI Compliance Pre-Screen - ${result.documentType}]: Verdict: ${result.overallVerdict} (${result.score}%). ${result.summary}`,
+          });
+        }}
+      />
     </div>
   );
 };

@@ -7,6 +7,7 @@ import {
   SlidersHorizontal,
   X,
   Trash2,
+  Download,
 } from 'lucide-react';
 import { CertificationScheme } from '../types';
 
@@ -24,6 +25,7 @@ interface FilterBarProps {
   totalFilteredCount: number;
   totalAppsCount?: number;
   onClearAll?: () => void;
+  onExportCsv?: () => void;
 }
 
 export const FilterBar: React.FC<FilterBarProps> = ({
@@ -40,6 +42,7 @@ export const FilterBar: React.FC<FilterBarProps> = ({
   totalFilteredCount,
   totalAppsCount = 0,
   onClearAll,
+  onExportCsv,
 }) => {
   const statusTabs = [
     { id: 'ALL', label: 'All Applications' },
@@ -141,6 +144,17 @@ export const FilterBar: React.FC<FilterBarProps> = ({
             <List className="w-4 h-4" />
           </button>
         </div>
+
+        {onExportCsv && (
+          <button
+            onClick={onExportCsv}
+            className="flex items-center gap-1 px-2.5 py-1 text-xs font-semibold text-slate-700 hover:text-slate-900 bg-white hover:bg-slate-100 border border-slate-300 rounded-md transition-colors shrink-0 shadow-2xs cursor-pointer"
+            title="Export applications to CSV spreadsheet"
+          >
+            <Download className="w-3.5 h-3.5 text-slate-600" />
+            <span className="hidden sm:inline">Export CSV</span>
+          </button>
+        )}
 
         {hasActiveFilters && (
           <button
