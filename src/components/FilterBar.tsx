@@ -24,6 +24,7 @@ interface FilterBarProps {
   onViewModeChange: (mode: 'grid' | 'table') => void;
   totalFilteredCount: number;
   totalAppsCount?: number;
+  currentUserEmail?: string;
   onClearAll?: () => void;
   onExportCsv?: () => void;
 }
@@ -41,6 +42,7 @@ export const FilterBar: React.FC<FilterBarProps> = ({
   onViewModeChange,
   totalFilteredCount,
   totalAppsCount = 0,
+  currentUserEmail,
   onClearAll,
   onExportCsv,
 }) => {
@@ -110,9 +112,16 @@ export const FilterBar: React.FC<FilterBarProps> = ({
         <select
           value={assigneeFilter}
           onChange={(e) => onAssigneeFilterChange(e.target.value)}
-          className="text-sm border border-slate-200 rounded-md bg-white py-1.5 pl-3 pr-8 focus:outline-none focus:ring-1 focus:ring-indigo-500 appearance-none min-w-[140px]"
+          className={`text-sm border rounded-md py-1.5 pl-3 pr-8 focus:outline-none focus:ring-1 focus:ring-indigo-500 appearance-none min-w-[140px] font-medium transition-colors ${
+            assigneeFilter === 'ME'
+              ? 'bg-indigo-50 border-indigo-300 text-indigo-800'
+              : 'bg-white border-slate-200 text-slate-800'
+          }`}
         >
           <option value="ALL">All Assignees</option>
+          {currentUserEmail && (
+            <option value="ME">👤 Assigned to Me ({currentUserEmail.split('@')[0]})</option>
+          )}
           <option value="APPLICANT">Pending Applicant (Cytron)</option>
           <option value="SIRIM">Pending SIRIM QAS</option>
           <option value="LAB">Pending Lab</option>

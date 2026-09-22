@@ -25,6 +25,7 @@ import {
 
 interface ApplicationTableProps {
   applications: SirimApplication[];
+  currentUserEmail?: string;
   onSelect: (app: SirimApplication) => void;
   onQuickDraftReply: (app: SirimApplication) => void;
   onDelete?: (appId: string, e: React.MouseEvent) => void;
@@ -32,6 +33,7 @@ interface ApplicationTableProps {
 
 export const ApplicationTable: React.FC<ApplicationTableProps> = ({
   applications,
+  currentUserEmail,
   onSelect,
   onQuickDraftReply,
   onDelete,
@@ -111,6 +113,14 @@ export const ApplicationTable: React.FC<ApplicationTableProps> = ({
                     <div className="text-slate-500 font-mono text-[11px] mt-0.5">
                       {app.modelNumber} • <span className="font-sans font-medium">{app.brand}</span>
                     </div>
+                    {app.lastModifiedBy && (
+                      <div className="text-[10px] text-slate-400 mt-0.5 flex items-center gap-1">
+                        <span>Updated by</span>
+                        <span className="font-medium text-slate-600">
+                          {app.lastModifiedBy === currentUserEmail ? 'You' : app.lastModifiedBy.split('@')[0]}
+                        </span>
+                      </div>
+                    )}
                   </td>
 
                   {/* 3. Email Thread & Link */}

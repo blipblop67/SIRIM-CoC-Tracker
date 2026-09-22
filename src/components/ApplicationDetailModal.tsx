@@ -61,6 +61,8 @@ interface ApplicationDetailModalProps {
   onUpdateApplication: (updatedApp: SirimApplication) => void;
   onDeleteApplication?: (appId: string) => void;
   accessToken?: string;
+  currentUserEmail?: string;
+  currentUserName?: string;
   initialTab?: 'actions' | 'checklist' | 'timeline' | 'emails' | 'ai-reply' | 'dossier';
 }
 
@@ -71,6 +73,8 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({
   onUpdateApplication,
   onDeleteApplication,
   accessToken,
+  currentUserEmail,
+  currentUserName,
   initialTab = 'actions',
 }) => {
   if (!isOpen || !application) return null;
@@ -87,6 +91,7 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({
   const [newActionTitle, setNewActionTitle] = useState('');
   const [newActionDesc, setNewActionDesc] = useState('');
   const [newActionAssignee, setNewActionAssignee] = useState<ActionAssignee>('APPLICANT');
+  const [newActionAssignedUserEmail, setNewActionAssignedUserEmail] = useState('');
   const [newActionPriority, setNewActionPriority] = useState<ActionItemPriority>('HIGH');
   const [newActionType, setNewActionType] = useState<ActionItemType>('SUBMIT_DOC');
   const [newActionDueDate, setNewActionDueDate] = useState('');
@@ -234,6 +239,7 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({
           ...a,
           isCompleted: nextState,
           completedAt: nextState ? new Date().toISOString() : undefined,
+          completedBy: nextState ? (currentUserEmail || 'team-member') : undefined,
         };
       }
       return a;
@@ -255,6 +261,12 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({
       title: newActionTitle.trim(),
       description: newActionDesc.trim() || newActionTitle.trim(),
       assignedTo: newActionAssignee,
+      assignedToUserEmail: newActionAssignedUserEmail.trim() || undefined,
+      assignedToName: newActionAssignedUserEmail.trim()
+        ? (newActionAssignedUserEmail === currentUserEmail && currentUserName
+            ? currentUserName
+            : newActionAssignedUserEmail.split('@')[0])
+        : undefined,
       priority: newActionPriority,
       requiredActionType: newActionType,
       dueDate: newActionDueDate || undefined,
@@ -268,6 +280,7 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({
 
     setNewActionTitle('');
     setNewActionDesc('');
+    setNewActionAssignedUserEmail('');
     setShowAddAction(false);
   };
 
@@ -782,6 +795,29 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({
                       />
                     </div>
                   </div>
+                  <div>
+                    <div className="flex items-center justify-between">
+                      <label className="text-[10px] font-semibold text-slate-500 uppercase">
+                        Assign To Team Member (Email)
+                      </label>
+                      {currentUserEmail && (
+                        <button
+                          type="button"
+                          onClick={() => setNewActionAssignedUserEmail(currentUserEmail)}
+                          className="text-[10px] text-indigo-600 hover:text-indigo-800 font-medium underline"
+                        >
+                          Assign to me ({currentUserEmail.split('@')[0]})
+                        </button>
+                      )}
+                    </div>
+                    <input
+                      type="email"
+                      placeholder="e.g. boss@cytron.io, lead@cytron.io"
+                      value={newActionAssignedUserEmail}
+                      onChange={(e) => setNewActionAssignedUserEmail(e.target.value)}
+                      className="w-full text-xs px-3 py-1.5 border border-slate-300 rounded-lg bg-white mt-1"
+                    />
+                  </div>
                   <div className="flex justify-end gap-2 pt-1">
                     <button
                       type="button"
@@ -833,7 +869,7 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({
                             >
                               {action.title}
                             </h5>
-                            <div className="flex items-center gap-1.5">
+                            <div className="flex items-center gap-1.5 flex-wrap">
                               <span
                                 className={`text-[10px] font-bold px-1.5 py-0.5 rounded border ${pBadge.bg} ${pBadge.text} ${pBadge.border}`}
                               >
@@ -847,6 +883,14 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({
                                   </span>
                                 );
                               })()}
+                              {action.assignedToUserEmail && (
+                                <span
+                                  className="text-[10px] font-semibold px-1.5 py-0.5 rounded border bg-indigo-50 text-indigo-700 border-indigo-200"
+                                  title={`Assigned to ${action.assignedToUserEmail}`}
+                                >
+                                  👤 {action.assignedToName || action.assignedToUserEmail.split('@')[0]}
+                                </span>
+                              )}
                             </div>
                           </div>
 
@@ -861,7 +905,7 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({
                           )}
 
                           <div className="flex items-center justify-between text-[11px] text-slate-500 pt-1">
-                            <div className="flex items-center gap-2">
+                            <div className="flex items-center gap-2 flex-wrap">
                               {action.dueDate && (
                                 <span className="flex items-center gap-1 font-medium text-slate-700">
                                   <Calendar className="w-3 h-3 text-slate-400" />
@@ -870,7 +914,7 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({
                               )}
                               {action.completedAt && (
                                 <span className="text-emerald-700 font-medium">
-                                  ✓ Completed on {formatDate(action.completedAt)}
+                                  ✓ Completed {action.completedBy ? `by ${action.completedBy.split('@')[0]}` : ''} on {formatDate(action.completedAt)}
                                 </span>
                               )}
                             </div>

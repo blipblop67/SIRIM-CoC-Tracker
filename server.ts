@@ -507,6 +507,8 @@ async function startServer() {
   }
   const CONFIG_FILE = path.join(DATA_DIR, "automation-config.json");
   const APPS_FILE = path.join(DATA_DIR, "applications-store.json");
+  const ACTIVITY_FILE = path.join(DATA_DIR, "team-activity.json");
+  const PRESENCE_FILE = path.join(DATA_DIR, "user-presence.json");
 
   function getStoredAutomationConfig() {
     const defaults = {
@@ -578,6 +580,97 @@ async function startServer() {
       fs.writeFileSync(APPS_FILE, JSON.stringify(apps, null, 2), "utf8");
     } catch (err) {
       console.error("Could not write applications-store.json:", err);
+    }
+  }
+
+  function getStoredTeamActivity(): any[] {
+    try {
+      if (fs.existsSync(ACTIVITY_FILE)) {
+        const raw = fs.readFileSync(ACTIVITY_FILE, "utf8");
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) return parsed;
+      }
+    } catch (err) {
+      console.warn("Could not read team-activity.json:", err);
+    }
+    return [];
+  }
+
+  function recordTeamActivity(entry: any) {
+    try {
+      const current = getStoredTeamActivity();
+      const enriched = {
+        id: entry.id || `act-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+        timestamp: entry.timestamp || new Date().toISOString(),
+        userEmail: entry.userEmail || "team-member",
+        userName: entry.userName || (entry.userEmail ? entry.userEmail.split("@")[0] : "Team Member"),
+        userPicture: entry.userPicture,
+        actionType: entry.actionType || "APP_EDITED",
+        applicationRef: entry.applicationRef || "",
+        productName: entry.productName || "",
+        description: entry.description || "",
+        details: entry.details || {},
+      };
+      const updated = [enriched, ...current].slice(0, 150);
+      fs.writeFileSync(ACTIVITY_FILE, JSON.stringify(updated, null, 2), "utf8");
+      return enriched;
+    } catch (err) {
+      console.error("Could not write team-activity.json:", err);
+      return null;
+    }
+  }
+
+  function getStoredPresence(): any[] {
+    try {
+      if (fs.existsSync(PRESENCE_FILE)) {
+        const raw = fs.readFileSync(PRESENCE_FILE, "utf8");
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) {
+          // Filter out users inactive for more than 5 minutes
+          const fiveMinAgo = Date.now() - 5 * 60 * 1000;
+          return parsed.filter((p) => {
+            const t = new Date(p.lastActive).getTime();
+            return !isNaN(t) && t > fiveMinAgo;
+          });
+        }
+      }
+    } catch (err) {
+      console.warn("Could not read user-presence.json:", err);
+    }
+    return [];
+  }
+
+  function recordUserPresence(user: { email: string; name?: string; picture?: string; activeAction?: string }) {
+    if (!user || !user.email) return getStoredPresence();
+    try {
+      const activeList = getStoredPresence();
+      const nowStr = new Date().toISOString();
+      const idx = activeList.findIndex((p) => p.email.toLowerCase() === user.email.toLowerCase());
+      const record = {
+        email: user.email,
+        name: user.name || user.email.split("@")[0],
+        picture: user.picture,
+        lastActive: nowStr,
+        activeAction: user.activeAction || "Active in workspace",
+      };
+      if (idx >= 0) {
+        activeList[idx] = record;
+      } else {
+        activeList.push(record);
+        // Log member active if new
+        recordTeamActivity({
+          userEmail: user.email,
+          userName: record.name,
+          userPicture: record.picture,
+          actionType: "MEMBER_JOINED",
+          description: `${record.name} connected to the team workspace.`,
+        });
+      }
+      fs.writeFileSync(PRESENCE_FILE, JSON.stringify(activeList, null, 2), "utf8");
+      return activeList;
+    } catch (err) {
+      console.error("Could not write user-presence.json:", err);
+      return [];
     }
   }
 
@@ -1667,6 +1760,13 @@ Evaluate thoroughly and return a JSON matching the schema.`;
         },
       });
 
+      recordTeamActivity({
+        userEmail,
+        actionType: "SHEET_SYNC",
+        description: `${userEmail ? userEmail.split("@")[0] : "Team member"} synchronized ${appsToSync.length} applications to Google Sheet.`,
+        details: { spreadsheetId, count: appsToSync.length },
+      });
+
       res.json({
         success: true,
         spreadsheetId,
@@ -2232,7 +2332,7 @@ Evaluate thoroughly and return a JSON matching the schema.`;
 
   app.post("/api/applications/save", (req: Request, res: Response) => {
     try {
-      const { applications, userEmail, merge = true } = req.body;
+      const { applications, userEmail, merge = true, activitySummary } = req.body;
       if (!Array.isArray(applications)) {
         return res.status(400).json({ error: "Invalid applications array" });
       }
@@ -2241,9 +2341,23 @@ Evaluate thoroughly and return a JSON matching the schema.`;
       if (merge === false) {
         // Complete replacement (e.g. user confirmed clearing all applications)
         finalApps = applications;
+        recordTeamActivity({
+          userEmail,
+          actionType: "APP_DELETED",
+          description: `${userEmail || "A team member"} cleared all applications from the shared database.`,
+        });
       } else {
         const current = getStoredApplications();
         finalApps = mergeApplicationsList(current, applications, userEmail);
+        if (activitySummary) {
+          recordTeamActivity({
+            userEmail,
+            actionType: activitySummary.actionType || "APP_EDITED",
+            applicationRef: activitySummary.applicationRef,
+            productName: activitySummary.productName,
+            description: activitySummary.description || `Updated application ${activitySummary.applicationRef || ""}`,
+          });
+        }
       }
 
       saveStoredApplications(finalApps);
@@ -2256,12 +2370,75 @@ Evaluate thoroughly and return a JSON matching the schema.`;
   app.delete("/api/applications/:id", (req: Request, res: Response) => {
     try {
       const targetId = req.params.id;
+      const userEmail = (req.query.userEmail as string) || "team-member";
       const current = getStoredApplications();
+      const targetApp = current.find((a: any) => a.id === targetId);
       const filtered = current.filter((a: any) => a.id !== targetId);
       saveStoredApplications(filtered);
+
+      if (targetApp) {
+        recordTeamActivity({
+          userEmail,
+          actionType: "APP_DELETED",
+          applicationRef: targetApp.applicationRef,
+          productName: targetApp.productName,
+          description: `${userEmail.split("@")[0]} removed application [${targetApp.applicationRef || targetApp.productName}] from the tracker.`,
+        });
+      }
+
       res.json({ success: true, count: filtered.length });
     } catch (err: any) {
       res.status(500).json({ error: "Failed to delete application", details: err?.message });
+    }
+  });
+
+  // ----------------------------------------------------
+  // Team Presence & Active Collaborators Endpoints
+  // ----------------------------------------------------
+  app.get("/api/presence", (req: Request, res: Response) => {
+    try {
+      const activeUsers = getStoredPresence();
+      res.json({ success: true, activeUsers });
+    } catch (err: any) {
+      res.status(500).json({ error: "Failed to retrieve presence", details: err?.message });
+    }
+  });
+
+  app.post("/api/presence/heartbeat", (req: Request, res: Response) => {
+    try {
+      const { email, name, picture, activeAction } = req.body;
+      if (!email) {
+        return res.status(400).json({ error: "Email is required for heartbeat" });
+      }
+      const activeUsers = recordUserPresence({ email, name, picture, activeAction });
+      res.json({ success: true, activeUsers });
+    } catch (err: any) {
+      res.status(500).json({ error: "Failed to update heartbeat", details: err?.message });
+    }
+  });
+
+  // ----------------------------------------------------
+  // Team Activity / Audit Trail Endpoints
+  // ----------------------------------------------------
+  app.get("/api/team-activity", (req: Request, res: Response) => {
+    try {
+      const activities = getStoredTeamActivity();
+      res.json({ success: true, activities });
+    } catch (err: any) {
+      res.status(500).json({ error: "Failed to retrieve activity log", details: err?.message });
+    }
+  });
+
+  app.post("/api/team-activity", (req: Request, res: Response) => {
+    try {
+      const entry = req.body;
+      if (!entry || !entry.description) {
+        return res.status(400).json({ error: "Activity description is required" });
+      }
+      const recorded = recordTeamActivity(entry);
+      res.json({ success: true, activity: recorded });
+    } catch (err: any) {
+      res.status(500).json({ error: "Failed to record activity", details: err?.message });
     }
   });
 
@@ -2401,6 +2578,7 @@ Evaluate thoroughly and return a JSON matching the schema.`;
         autoSyncSheet: directAutoSync,
         autoSendTelegram: directAutoTelegram,
         options = {},
+        userEmail,
       } = req.body;
 
       const sheetConfig = directSheetConfig || (spreadsheetId ? {
@@ -2885,6 +3063,13 @@ isSirimRelated (boolean), applicationRef (string), productName (string), modelNu
 
       // Persist the combined, updated applications to central server storage
       saveStoredApplications(currentApplications);
+
+      recordTeamActivity({
+        userEmail,
+        actionType: "GMAIL_SCAN",
+        description: `${userEmail ? userEmail.split("@")[0] : "Team member"} executed pipeline cycle (${newEmailsDetected} new emails detected, ${currentApplications.length} active apps).`,
+        details: { newEmailsDetected, sheetSyncSuccess, telegramSent },
+      });
 
       addLog("SYSTEM", "SUCCESS", "Automated synchronization pipeline completed successfully.");
 

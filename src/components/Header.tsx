@@ -17,8 +17,10 @@ import {
   Download,
   FileCheck,
   Database,
+  Activity,
+  Users,
 } from 'lucide-react';
-import { AutomationConfig, SheetSyncConfig, UserAuthSession } from '../types';
+import { AutomationConfig, SheetSyncConfig, UserAuthSession, UserPresence } from '../types';
 
 interface HeaderProps {
   sheetConfig: SheetSyncConfig | null;
@@ -29,12 +31,14 @@ interface HeaderProps {
   applicationsCount?: number;
   serverSyncStatus?: 'synced' | 'syncing' | 'offline';
   lastServerSyncTime?: string;
+  activeUsers?: UserPresence[];
   onRefreshFromServer?: () => void;
   onOpenSheetModal: () => void;
   onOpenGmailScanner: () => void;
   onOpenNewAppModal: () => void;
   onOpenNotificationDrawer: () => void;
   onOpenAutomationModal: () => void;
+  onOpenActivityDrawer?: () => void;
   onConnectGoogle: () => void;
   onDisconnectGoogle: () => void;
   onManualSyncSheet: () => void;
@@ -54,12 +58,14 @@ export const Header: React.FC<HeaderProps> = ({
   applicationsCount = 0,
   serverSyncStatus = 'synced',
   lastServerSyncTime,
+  activeUsers = [],
   onRefreshFromServer,
   onOpenSheetModal,
   onOpenGmailScanner,
   onOpenNewAppModal,
   onOpenNotificationDrawer,
   onOpenAutomationModal,
+  onOpenActivityDrawer,
   onConnectGoogle,
   onDisconnectGoogle,
   onManualSyncSheet,
@@ -241,6 +247,57 @@ export const Header: React.FC<HeaderProps> = ({
         </div>
 
         <div className="h-6 w-px bg-slate-700 hidden sm:block"></div>
+
+        {/* Team Presence Avatar Cluster */}
+        {activeUsers.length > 0 && (
+          <div
+            className="hidden md:flex items-center -space-x-1.5 px-1.5 py-0.5 rounded-lg bg-slate-800/70 border border-slate-700/60"
+            title={`Active team collaborators (${activeUsers.length}): ${activeUsers
+              .map((u) => u.name || u.email.split('@')[0])
+              .join(', ')}`}
+          >
+            {activeUsers.slice(0, 3).map((usr) => {
+              const displayName = usr.name || usr.email.split('@')[0];
+              const initial = displayName.charAt(0).toUpperCase();
+              return (
+                <div
+                  key={usr.email}
+                  className="relative w-6 h-6 rounded-full border-2 border-slate-900 overflow-hidden bg-indigo-600 text-white font-bold text-[10px] flex items-center justify-center shrink-0 shadow-xs"
+                  title={`${displayName} (${usr.email}) - Online`}
+                >
+                  {usr.picture ? (
+                    <img
+                      src={usr.picture}
+                      alt={displayName}
+                      className="w-full h-full object-cover"
+                      referrerPolicy="no-referrer"
+                    />
+                  ) : (
+                    initial
+                  )}
+                  <span className="absolute bottom-0 right-0 w-1.5 h-1.5 bg-emerald-400 rounded-full ring-1 ring-slate-900" />
+                </div>
+              );
+            })}
+            {activeUsers.length > 3 && (
+              <span className="w-5 h-5 rounded-full bg-slate-700 text-slate-300 text-[9px] font-bold flex items-center justify-center border border-slate-800 pl-0.5">
+                +{activeUsers.length - 3}
+              </span>
+            )}
+          </div>
+        )}
+
+        {/* Team Activity Feed Button */}
+        {onOpenActivityDrawer && (
+          <button
+            onClick={onOpenActivityDrawer}
+            className="relative text-slate-300 hover:text-white transition-colors p-1.5 rounded-lg hover:bg-slate-800 flex items-center gap-1"
+            title="Open Team Activity & Audit Feed"
+          >
+            <Activity className="w-4 h-4 text-indigo-400" />
+            <span className="text-[11px] font-medium hidden lg:inline text-slate-300">Activity</span>
+          </button>
+        )}
 
         {/* Notifications Bell */}
         <button

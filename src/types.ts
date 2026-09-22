@@ -35,11 +35,14 @@ export interface ActionItem {
   title: string;
   description: string;
   assignedTo: ActionAssignee;
+  assignedToUserEmail?: string;
+  assignedToName?: string;
   dueDate?: string;
   isCompleted: boolean;
   priority: ActionItemPriority;
   requiredActionType: ActionItemType;
   completedAt?: string;
+  completedBy?: string;
   emailSourceSnippet?: string;
 }
 
@@ -262,5 +265,35 @@ export interface AutomationConfig {
   firstScanDurationDays?: number; // default 365 days (1 whole year)
   routineScanDurationDays?: number; // default 30 days (1 month)
   scanScopeMode?: 'auto' | 'first_time_1y' | 'routine_1m' | 'custom';
+}
+
+export interface UserPresence {
+  email: string;
+  name?: string;
+  picture?: string;
+  lastActive: string; // ISO timestamp
+  activeAction?: string; // e.g. "Viewing SQAS/2026/0481" or "Online"
+}
+
+export interface TeamActivityLog {
+  id: string;
+  timestamp: string;
+  userEmail: string;
+  userName?: string;
+  userPicture?: string;
+  actionType:
+    | 'STATUS_CHANGE'
+    | 'ACTION_TOGGLE'
+    | 'APP_ADDED'
+    | 'APP_EDITED'
+    | 'APP_DELETED'
+    | 'SHEET_SYNC'
+    | 'GMAIL_SCAN'
+    | 'NOTE_ADDED'
+    | 'MEMBER_JOINED';
+  applicationRef?: string;
+  productName?: string;
+  description: string;
+  details?: Record<string, any>;
 }
 

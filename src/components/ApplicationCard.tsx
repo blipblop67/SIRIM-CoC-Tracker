@@ -31,6 +31,7 @@ import { Mail, Trash2, Building2 } from 'lucide-react';
 
 interface ApplicationCardProps {
   application: SirimApplication;
+  currentUserEmail?: string;
   onSelect: (app: SirimApplication) => void;
   onToggleActionItem: (appId: string, actionItemId: string) => void;
   onQuickDraftReply: (app: SirimApplication) => void;
@@ -39,6 +40,7 @@ interface ApplicationCardProps {
 
 export const ApplicationCard: React.FC<ApplicationCardProps> = ({
   application,
+  currentUserEmail,
   onSelect,
   onToggleActionItem,
   onQuickDraftReply,
@@ -47,6 +49,16 @@ export const ApplicationCard: React.FC<ApplicationCardProps> = ({
   const [copiedRef, setCopiedRef] = React.useState(false);
   const statusInfo = getStatusBadgeInfo(application.status);
   const deadlineInfo = calculateDeadlineInfo(application.targetDeadline);
+
+  const isAssignedToMe = Boolean(
+    currentUserEmail &&
+      application.actionItems.some(
+        (a) =>
+          !a.isCompleted &&
+          (a.assignedToUserEmail?.toLowerCase() === currentUserEmail.toLowerCase() ||
+            (a.assignedToName && currentUserEmail.toLowerCase().includes(a.assignedToName.toLowerCase())))
+      )
+  );
 
   const copyRef = (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -71,15 +83,25 @@ export const ApplicationCard: React.FC<ApplicationCardProps> = ({
     >
       {/* Top Banner: Status & Scheme */}
       <div className="p-4 pb-3 space-y-2.5">
-        <div className="flex items-start justify-between gap-2">
-          {/* Scheme pill */}
-          <span
-            className={`inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-semibold border ${getSchemeColor(
-              application.scheme
-            )}`}
-          >
-            {application.scheme}
-          </span>
+        <div className="flex items-start justify-between gap-2 flex-wrap">
+          <div className="flex items-center gap-1.5 flex-wrap">
+            {/* Scheme pill */}
+            <span
+              className={`inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-semibold border ${getSchemeColor(
+                application.scheme
+              )}`}
+            >
+              {application.scheme}
+            </span>
+
+            {/* My Task badge */}
+            {isAssignedToMe && (
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-bold bg-indigo-100 text-indigo-800 border border-indigo-300 shadow-2xs">
+                <User className="w-2.5 h-2.5" />
+                <span>Your Task</span>
+              </span>
+            )}
+          </div>
 
           {/* Status Badge */}
           <span

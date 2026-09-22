@@ -24,6 +24,8 @@ import {
   UserAuthSession,
   AutomationConfig,
   AutomationLogEntry,
+  UserPresence,
+  TeamActivityLog,
 } from './types';
 import { INITIAL_SIRIM_APPLICATIONS } from './data/sampleApplications';
 import { Header } from './components/Header';
@@ -38,6 +40,7 @@ import { NewApplicationModal } from './components/NewApplicationModal';
 import { NotificationDrawer } from './components/NotificationDrawer';
 import { AutomationModal } from './components/AutomationModal';
 import { DocumentPreScreenModal } from './components/DocumentPreScreenModal';
+import { TeamActivityDrawer } from './components/TeamActivityDrawer';
 import { exportApplicationsToCsv } from './utils/exportCsv';
 import {
   getStoredAuthSession,
@@ -267,6 +270,12 @@ export default function App() {
   const [isNotificationDrawerOpen, setIsNotificationDrawerOpen] = useState(false);
   const [isAutomationModalOpen, setIsAutomationModalOpen] = useState(false);
   const [isGlobalPreScreenOpen, setIsGlobalPreScreenOpen] = useState(false);
+  const [isActivityDrawerOpen, setIsActivityDrawerOpen] = useState(false);
+
+  // Multi-user collaborative presence & audit log state
+  const [activeUsers, setActiveUsers] = useState<UserPresence[]>([]);
+  const [teamActivities, setTeamActivities] = useState<TeamActivityLog[]>([]);
+  const [isLoadingActivities, setIsLoadingActivities] = useState(false);
 
   // Sync and Automation Runner state
   const [isSyncingSheet, setIsSyncingSheet] = useState(false);
@@ -274,6 +283,65 @@ export default function App() {
   const [syncFeedback, setSyncFeedback] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
   const [serverSyncStatus, setServerSyncStatus] = useState<'synced' | 'syncing' | 'offline'>('synced');
   const [lastServerSyncTime, setLastServerSyncTime] = useState<string>('');
+
+  // Send presence heartbeat to inform teammates
+  const sendPresenceHeartbeat = async () => {
+    try {
+      const email = authSession?.email || 'team-member@cytron.io';
+      const name = authSession?.name || email.split('@')[0];
+      const picture = authSession?.picture;
+
+      const res = await fetch('/api/presence/heartbeat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email,
+          name,
+          picture,
+          activeAction: 'Viewing Applications',
+        }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.success && Array.isArray(data.activeUsers)) {
+          setActiveUsers(data.activeUsers);
+        }
+      }
+    } catch {
+      // background polling
+    }
+  };
+
+  // Fetch team activity log
+  const fetchTeamActivities = async () => {
+    try {
+      setIsLoadingActivities(true);
+      const res = await fetch('/api/team-activity');
+      if (res.ok) {
+        const data = await res.json();
+        if (data.success && Array.isArray(data.activities)) {
+          setTeamActivities(data.activities);
+        }
+      }
+    } catch {
+      // background polling
+    } finally {
+      setIsLoadingActivities(false);
+    }
+  };
+
+  // Heartbeat & Activity Polling
+  useEffect(() => {
+    sendPresenceHeartbeat();
+    fetchTeamActivities();
+
+    const interval = setInterval(() => {
+      sendPresenceHeartbeat();
+      fetchTeamActivities();
+    }, 20000);
+
+    return () => clearInterval(interval);
+  }, [authSession?.email, authSession?.name]);
 
   // Initial load: Fetch server config if available to merge environment or server settings
   useEffect(() => {
@@ -701,17 +769,26 @@ export default function App() {
   const handleToggleActionItem = (appId: string, actionItemId: string) => {
     const authorEmail = authSession?.email || 'team-member';
     const nowStr = new Date().toISOString();
+    let toggledItemTitle = '';
+    let targetAppRef = '';
+    let targetAppName = '';
+    let isNowCompleted = false;
 
     setApplications((prev) =>
       prev.map((app) => {
         if (app.id === appId) {
+          targetAppRef = app.applicationRef;
+          targetAppName = app.productName;
           const updatedActions = app.actionItems.map((act) => {
             if (act.id === actionItemId) {
               const nextState = !act.isCompleted;
+              toggledItemTitle = act.title;
+              isNowCompleted = nextState;
               return {
                 ...act,
                 isCompleted: nextState,
                 completedAt: nextState ? nowStr : undefined,
+                completedBy: nextState ? authorEmail : undefined,
               };
             }
             return act;
@@ -742,19 +819,38 @@ export default function App() {
                   ...act,
                   isCompleted: !act.isCompleted,
                   completedAt: !act.isCompleted ? nowStr : undefined,
+                  completedBy: !act.isCompleted ? authorEmail : undefined,
                 }
               : act
           ),
         };
       });
     }
+
+    // Log action to team activity feed
+    fetch('/api/team-activity', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        userEmail: authorEmail,
+        userName: authSession?.name,
+        userPicture: authSession?.picture,
+        actionType: 'ACTION_TOGGLE',
+        applicationRef: targetAppRef,
+        productName: targetAppName,
+        description: `${authorEmail.split('@')[0]} marked action "${toggledItemTitle || 'item'}" as ${isNowCompleted ? 'completed' : 'pending'}.`,
+      }),
+    })
+      .then(() => fetchTeamActivities())
+      .catch(() => {});
   };
 
   // Update full application from detail modal
   const handleUpdateApplication = (updatedApp: SirimApplication) => {
+    const authorEmail = authSession?.email || updatedApp.lastModifiedBy || 'team-member';
     const withAttribution: SirimApplication = {
       ...updatedApp,
-      lastModifiedBy: authSession?.email || updatedApp.lastModifiedBy || 'team-member',
+      lastModifiedBy: authorEmail,
       lastModifiedAt: new Date().toISOString(),
     };
     const prevApp = applications.find((a) => a.id === updatedApp.id);
@@ -768,13 +864,31 @@ export default function App() {
     ) {
       sendInstantTelegramAlert(withAttribution);
     }
+
+    // Log to team activity feed
+    fetch('/api/team-activity', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        userEmail: authorEmail,
+        userName: authSession?.name,
+        userPicture: authSession?.picture,
+        actionType: prevApp?.status !== updatedApp.status ? 'STATUS_CHANGE' : 'APPLICATION_UPDATE',
+        applicationRef: updatedApp.applicationRef,
+        productName: updatedApp.productName,
+        description: `${authorEmail.split('@')[0]} updated ${updatedApp.applicationRef} (${updatedApp.status.replace(/_/g, ' ')}).`,
+      }),
+    })
+      .then(() => fetchTeamActivities())
+      .catch(() => {});
   };
 
   // Add new application from Modal / AI parser
   const handleAddApplication = (newApp: SirimApplication) => {
+    const authorEmail = authSession?.email || newApp.lastModifiedBy || 'team-member';
     const withAttribution: SirimApplication = {
       ...newApp,
-      lastModifiedBy: authSession?.email || newApp.lastModifiedBy || 'team-member',
+      lastModifiedBy: authorEmail,
       lastModifiedAt: new Date().toISOString(),
     };
     setApplications((prev) => sanitizeApplications([withAttribution, ...prev]));
@@ -790,6 +904,23 @@ export default function App() {
     ) {
       sendInstantTelegramAlert(withAttribution);
     }
+
+    // Log to team activity feed
+    fetch('/api/team-activity', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        userEmail: authorEmail,
+        userName: authSession?.name,
+        userPicture: authSession?.picture,
+        actionType: 'APPLICATION_CREATE',
+        applicationRef: newApp.applicationRef,
+        productName: newApp.productName,
+        description: `${authorEmail.split('@')[0]} added application ${newApp.applicationRef} (${newApp.productName}).`,
+      }),
+    })
+      .then(() => fetchTeamActivities())
+      .catch(() => {});
   };
 
   // Import batch from Gmail scanner
@@ -869,6 +1000,9 @@ export default function App() {
     if (e) {
       e.stopPropagation();
     }
+    const targetApp = applications.find((a) => a.id === appId);
+    const authorEmail = authSession?.email || 'team-member';
+
     if (window.confirm('Are you sure you want to remove this application from the tracker?')) {
       setApplications((prev) => prev.filter((a) => a.id !== appId));
       if (selectedApplication?.id === appId) {
@@ -879,6 +1013,23 @@ export default function App() {
       fetch(`/api/applications/${encodeURIComponent(appId)}`, {
         method: 'DELETE',
       }).catch(() => {});
+
+      // Log delete to team activity feed
+      fetch('/api/team-activity', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          userEmail: authorEmail,
+          userName: authSession?.name,
+          userPicture: authSession?.picture,
+          actionType: 'APPLICATION_DELETE',
+          applicationRef: targetApp?.applicationRef || appId,
+          productName: targetApp?.productName,
+          description: `${authorEmail.split('@')[0]} deleted application ${targetApp?.applicationRef || appId}.`,
+        }),
+      })
+        .then(() => fetchTeamActivities())
+        .catch(() => {});
 
       notificationAudio.playSuccessTone();
       setSyncFeedback({
@@ -947,7 +1098,17 @@ export default function App() {
       }
 
       // Assignee filter
-      if (assigneeFilter !== 'ALL') {
+      if (assigneeFilter === 'ME') {
+        const myEmail = authSession?.email?.toLowerCase();
+        if (!myEmail) return false;
+        const hasMyAction = app.actionItems.some(
+          (a) =>
+            !a.isCompleted &&
+            (a.assignedToUserEmail?.toLowerCase() === myEmail ||
+              (a.assignedToName && myEmail.includes(a.assignedToName.toLowerCase())))
+        );
+        if (!hasMyAction) return false;
+      } else if (assigneeFilter !== 'ALL') {
         const hasAssigneeAction = app.actionItems.some(
           (a) => !a.isCompleted && a.assignedTo === assigneeFilter
         );
@@ -956,7 +1117,7 @@ export default function App() {
 
       return true;
     });
-  }, [applications, searchQuery, statusFilter, schemeFilter, assigneeFilter]);
+  }, [applications, searchQuery, statusFilter, schemeFilter, assigneeFilter, authSession?.email]);
 
   // Counts for header badge
   const pendingActionsCount = useMemo(() => {
@@ -981,6 +1142,8 @@ export default function App() {
         pendingActionsCount={pendingActionsCount}
         criticalActionsCount={criticalActionsCount}
         applicationsCount={applications.length}
+        activeUsers={activeUsers}
+        onOpenActivityDrawer={() => setIsActivityDrawerOpen(true)}
         onOpenSheetModal={() => setIsSheetModalOpen(true)}
         onOpenGmailScanner={() => setIsGmailScannerOpen(true)}
         onOpenNewAppModal={() => setIsNewAppModalOpen(true)}
@@ -1056,6 +1219,7 @@ export default function App() {
               onViewModeChange={setViewMode}
               totalFilteredCount={filteredApplications.length}
               totalAppsCount={applications.length}
+              currentUserEmail={authSession?.email}
               onClearAll={handleClearAllApplications}
               onExportCsv={handleExportCsv}
             />
@@ -1164,6 +1328,8 @@ export default function App() {
               <ApplicationCard
                 key={app.id}
                 application={app}
+                currentUserEmail={authSession?.email}
+                currentUserName={authSession?.name}
                 onSelect={handleOpenDetails}
                 onToggleActionItem={handleToggleActionItem}
                 onQuickDraftReply={handleQuickDraftReply}
@@ -1174,6 +1340,7 @@ export default function App() {
         ) : (
           <ApplicationTable
             applications={filteredApplications}
+            currentUserEmail={authSession?.email}
             onSelect={handleOpenDetails}
             onQuickDraftReply={handleQuickDraftReply}
             onDelete={handleDeleteApplication}
@@ -1205,8 +1372,28 @@ export default function App() {
           onDeleteApplication={handleDeleteApplication}
           initialTab={detailInitialTab}
           accessToken={authSession?.accessToken}
+          currentUserEmail={authSession?.email}
+          currentUserName={authSession?.name}
         />
       )}
+
+      {/* Team Activity Audit Feed Drawer */}
+      <TeamActivityDrawer
+        isOpen={isActivityDrawerOpen}
+        onClose={() => setIsActivityDrawerOpen(false)}
+        activities={teamActivities}
+        isLoading={isLoadingActivities}
+        onRefresh={fetchTeamActivities}
+        onSelectApplicationRef={(ref) => {
+          const matched = applications.find(
+            (a) => a.applicationRef.toLowerCase() === ref.toLowerCase()
+          );
+          if (matched) {
+            handleOpenDetails(matched);
+            setIsActivityDrawerOpen(false);
+          }
+        }}
+      />
 
       {isSheetModalOpen && (
         <GoogleSheetSyncModal
