@@ -588,7 +588,13 @@ async function startServer() {
       if (fs.existsSync(ACTIVITY_FILE)) {
         const raw = fs.readFileSync(ACTIVITY_FILE, "utf8");
         const parsed = JSON.parse(raw);
-        if (Array.isArray(parsed)) return parsed;
+        if (Array.isArray(parsed)) {
+          // Filter out dummy/placeholder accounts
+          return parsed.filter((a) => {
+            const em = (a.userEmail || "").toLowerCase();
+            return em !== "team-member@cytron.io" && !em.startsWith("team-member");
+          });
+        }
       }
     } catch (err) {
       console.warn("Could not read team-activity.json:", err);
@@ -599,11 +605,16 @@ async function startServer() {
   function recordTeamActivity(entry: any) {
     try {
       const current = getStoredTeamActivity();
+      const rawEmail = (entry.userEmail || "").trim();
+      const isPlaceholder = !rawEmail || rawEmail === "team-member@cytron.io" || rawEmail.startsWith("team-member");
+      const userEmail = isPlaceholder ? "" : rawEmail;
+      const userName = entry.userName || (userEmail ? userEmail.split("@")[0] : "Team Collaborator");
+
       const enriched = {
         id: entry.id || `act-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
         timestamp: entry.timestamp || new Date().toISOString(),
-        userEmail: entry.userEmail || "team-member",
-        userName: entry.userName || (entry.userEmail ? entry.userEmail.split("@")[0] : "Team Member"),
+        userEmail,
+        userName,
         userPicture: entry.userPicture,
         actionType: entry.actionType || "APP_EDITED",
         applicationRef: entry.applicationRef || "",
@@ -626,9 +637,13 @@ async function startServer() {
         const raw = fs.readFileSync(PRESENCE_FILE, "utf8");
         const parsed = JSON.parse(raw);
         if (Array.isArray(parsed)) {
-          // Filter out users inactive for more than 5 minutes
+          // Filter out users inactive for more than 5 minutes and remove any placeholder emails
           const fiveMinAgo = Date.now() - 5 * 60 * 1000;
           return parsed.filter((p) => {
+            const email = (p.email || "").toLowerCase().trim();
+            if (!email || email === "team-member@cytron.io" || email.startsWith("team-member") || !email.includes("@")) {
+              return false;
+            }
             const t = new Date(p.lastActive).getTime();
             return !isNaN(t) && t > fiveMinAgo;
           });
@@ -642,13 +657,19 @@ async function startServer() {
 
   function recordUserPresence(user: { email: string; name?: string; picture?: string; activeAction?: string }) {
     if (!user || !user.email) return getStoredPresence();
+    const cleanEmail = user.email.trim().toLowerCase();
+    // Strictly reject placeholder / non-real emails
+    if (cleanEmail === "team-member@cytron.io" || cleanEmail.startsWith("team-member") || !cleanEmail.includes("@")) {
+      return getStoredPresence();
+    }
+
     try {
       const activeList = getStoredPresence();
       const nowStr = new Date().toISOString();
-      const idx = activeList.findIndex((p) => p.email.toLowerCase() === user.email.toLowerCase());
+      const idx = activeList.findIndex((p) => p.email.toLowerCase() === cleanEmail);
       const record = {
-        email: user.email,
-        name: user.name || user.email.split("@")[0],
+        email: cleanEmail,
+        name: user.name || cleanEmail.split("@")[0],
         picture: user.picture,
         lastActive: nowStr,
         activeAction: user.activeAction || "Active in workspace",
@@ -659,7 +680,7 @@ async function startServer() {
         activeList.push(record);
         // Log member active if new
         recordTeamActivity({
-          userEmail: user.email,
+          userEmail: cleanEmail,
           userName: record.name,
           userPicture: record.picture,
           actionType: "MEMBER_JOINED",

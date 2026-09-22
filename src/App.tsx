@@ -284,12 +284,28 @@ export default function App() {
   const [serverSyncStatus, setServerSyncStatus] = useState<'synced' | 'syncing' | 'offline'>('synced');
   const [lastServerSyncTime, setLastServerSyncTime] = useState<string>('');
 
-  // Send presence heartbeat to inform teammates
+  // Send presence heartbeat to inform teammates (only for real authenticated accounts)
   const sendPresenceHeartbeat = async () => {
+    // If not authenticated, do not register a fake presence; only fetch active users
+    if (!authSession?.isAuthenticated || !authSession?.email) {
+      try {
+        const res = await fetch('/api/presence');
+        if (res.ok) {
+          const data = await res.json();
+          if (data.success && Array.isArray(data.activeUsers)) {
+            setActiveUsers(data.activeUsers);
+          }
+        }
+      } catch {
+        // background polling
+      }
+      return;
+    }
+
     try {
-      const email = authSession?.email || 'team-member@cytron.io';
-      const name = authSession?.name || email.split('@')[0];
-      const picture = authSession?.picture;
+      const email = authSession.email.trim();
+      const name = authSession.name || email.split('@')[0];
+      const picture = authSession.picture;
 
       const res = await fetch('/api/presence/heartbeat', {
         method: 'POST',
@@ -767,7 +783,7 @@ export default function App() {
 
   // Toggle Action Item Checkbox
   const handleToggleActionItem = (appId: string, actionItemId: string) => {
-    const authorEmail = authSession?.email || 'team-member';
+    const authorEmail = authSession?.email || 'rupa@cytron.io';
     const nowStr = new Date().toISOString();
     let toggledItemTitle = '';
     let targetAppRef = '';
@@ -847,7 +863,7 @@ export default function App() {
 
   // Update full application from detail modal
   const handleUpdateApplication = (updatedApp: SirimApplication) => {
-    const authorEmail = authSession?.email || updatedApp.lastModifiedBy || 'team-member';
+    const authorEmail = authSession?.email || updatedApp.lastModifiedBy || 'rupa@cytron.io';
     const withAttribution: SirimApplication = {
       ...updatedApp,
       lastModifiedBy: authorEmail,
@@ -885,7 +901,7 @@ export default function App() {
 
   // Add new application from Modal / AI parser
   const handleAddApplication = (newApp: SirimApplication) => {
-    const authorEmail = authSession?.email || newApp.lastModifiedBy || 'team-member';
+    const authorEmail = authSession?.email || newApp.lastModifiedBy || 'rupa@cytron.io';
     const withAttribution: SirimApplication = {
       ...newApp,
       lastModifiedBy: authorEmail,
@@ -925,7 +941,7 @@ export default function App() {
 
   // Import batch from Gmail scanner
   const handleImportApplications = (newApps: SirimApplication[]) => {
-    const authorEmail = authSession?.email || 'team-member';
+    const authorEmail = authSession?.email || 'rupa@cytron.io';
     const nowStr = new Date().toISOString();
     const withAttribution = newApps.map((a) => ({
       ...a,
@@ -981,7 +997,7 @@ export default function App() {
         body: JSON.stringify({
           applications: [],
           merge: false,
-          userEmail: authSession?.email || 'team-member',
+          userEmail: authSession?.email || 'rupa@cytron.io',
         }),
       }).catch(() => {});
 
@@ -1001,7 +1017,7 @@ export default function App() {
       e.stopPropagation();
     }
     const targetApp = applications.find((a) => a.id === appId);
-    const authorEmail = authSession?.email || 'team-member';
+    const authorEmail = authSession?.email || 'rupa@cytron.io';
 
     if (window.confirm('Are you sure you want to remove this application from the tracker?')) {
       setApplications((prev) => prev.filter((a) => a.id !== appId));
