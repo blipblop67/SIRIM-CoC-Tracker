@@ -263,6 +263,14 @@ export const ApplicationCard: React.FC<ApplicationCardProps> = ({
           </a>
           <span>•</span>
           <span className="shrink-0">{formatDate(application.lastActivityDate)}</span>
+          {application.lastModifiedBy && (
+            <>
+              <span>•</span>
+              <span className="shrink-0 text-slate-400 truncate max-w-[90px]" title={`Last updated by ${application.lastModifiedBy}`}>
+                by {application.lastModifiedBy.split('@')[0]}
+              </span>
+            </>
+          )}
         </div>
 
         <div className="flex items-center gap-1.5 shrink-0" onClick={(e) => e.stopPropagation()}>

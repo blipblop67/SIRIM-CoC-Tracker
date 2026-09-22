@@ -16,6 +16,7 @@ import {
   Trash2,
   Download,
   FileCheck,
+  Database,
 } from 'lucide-react';
 import { AutomationConfig, SheetSyncConfig, UserAuthSession } from '../types';
 
@@ -26,6 +27,9 @@ interface HeaderProps {
   pendingActionsCount: number;
   criticalActionsCount: number;
   applicationsCount?: number;
+  serverSyncStatus?: 'synced' | 'syncing' | 'offline';
+  lastServerSyncTime?: string;
+  onRefreshFromServer?: () => void;
   onOpenSheetModal: () => void;
   onOpenGmailScanner: () => void;
   onOpenNewAppModal: () => void;
@@ -48,6 +52,9 @@ export const Header: React.FC<HeaderProps> = ({
   pendingActionsCount,
   criticalActionsCount,
   applicationsCount = 0,
+  serverSyncStatus = 'synced',
+  lastServerSyncTime,
+  onRefreshFromServer,
   onOpenSheetModal,
   onOpenGmailScanner,
   onOpenNewAppModal,
@@ -103,6 +110,45 @@ export const Header: React.FC<HeaderProps> = ({
             <Send className="w-3 h-3 text-sky-400 ml-0.5" />
           )}
         </button>
+
+        {/* Shared Team Server Database Status */}
+        <div
+          className={`hidden md:flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs border transition-colors ${
+            serverSyncStatus === 'synced'
+              ? 'bg-slate-800/80 border-slate-700/80 text-slate-300'
+              : serverSyncStatus === 'syncing'
+              ? 'bg-sky-950/70 border-sky-600/50 text-sky-200'
+              : 'bg-amber-950/70 border-amber-600/50 text-amber-200'
+          }`}
+          title={
+            serverSyncStatus === 'synced'
+              ? `Shared Team Database: Active & Synced (${applicationsCount} applications). Click to refresh.`
+              : serverSyncStatus === 'syncing'
+              ? 'Syncing with Raspberry Pi / Server Database...'
+              : 'Server offline or using local cache'
+          }
+        >
+          <Database className={`w-3.5 h-3.5 ${serverSyncStatus === 'synced' ? 'text-emerald-400' : serverSyncStatus === 'syncing' ? 'text-sky-400 animate-spin' : 'text-amber-400'}`} />
+          <span className="font-medium text-[11px]">
+            {serverSyncStatus === 'synced' ? (
+              <>Shared DB <span className="text-emerald-400 font-bold">({applicationsCount})</span></>
+            ) : serverSyncStatus === 'syncing' ? (
+              'Syncing...'
+            ) : (
+              'Offline Cache'
+            )}
+          </span>
+          {onRefreshFromServer && (
+            <button
+              onClick={onRefreshFromServer}
+              disabled={serverSyncStatus === 'syncing'}
+              className="text-slate-400 hover:text-white p-0.5 ml-0.5 rounded transition-colors"
+              title="Refresh shared records from Raspberry Pi / Server"
+            >
+              <RefreshCw className={`w-2.5 h-2.5 ${serverSyncStatus === 'syncing' ? 'animate-spin text-sky-400' : ''}`} />
+            </button>
+          )}
+        </div>
 
         {/* Sync Status / Google Sheets */}
         {sheetConfig?.spreadsheetUrl ? (

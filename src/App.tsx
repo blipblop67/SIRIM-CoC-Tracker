@@ -154,6 +154,39 @@ function sanitizeApplications(apps: SirimApplication[]): SirimApplication[] {
   return result;
 }
 
+/**
+ * Smart Multi-User local & central server applications merger
+ */
+function mergeLocalAndServer(local: SirimApplication[], server: SirimApplication[]): SirimApplication[] {
+  if (!Array.isArray(server) || server.length === 0) return local || [];
+  if (!Array.isArray(local) || local.length === 0) return server || [];
+
+  const merged = [...server];
+  for (const loc of local) {
+    if (!loc) continue;
+    const idx = merged.findIndex(
+      (m) =>
+        (m.id && loc.id && m.id === loc.id) ||
+        (m.applicationRef &&
+          loc.applicationRef &&
+          m.applicationRef.trim().toLowerCase() === loc.applicationRef.trim().toLowerCase() &&
+          m.applicationRef.trim() !== '') ||
+        (m.threadId && loc.threadId && m.threadId === loc.threadId)
+    );
+    if (idx === -1) {
+      merged.push(loc);
+    } else {
+      const sItem = merged[idx];
+      const sModified = sItem.lastModifiedAt ? new Date(sItem.lastModifiedAt).getTime() : 0;
+      const lModified = loc.lastModifiedAt ? new Date(loc.lastModifiedAt).getTime() : 0;
+      if (lModified >= sModified) {
+        merged[idx] = { ...sItem, ...loc };
+      }
+    }
+  }
+  return merged;
+}
+
 export default function App() {
   // 1. Applications State (Starts clean with 0 dummy data)
   const [applications, setApplications] = useState<SirimApplication[]>(() => {
@@ -239,6 +272,8 @@ export default function App() {
   const [isSyncingSheet, setIsSyncingSheet] = useState(false);
   const [isRunningAutomation, setIsRunningAutomation] = useState(false);
   const [syncFeedback, setSyncFeedback] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
+  const [serverSyncStatus, setServerSyncStatus] = useState<'synced' | 'syncing' | 'offline'>('synced');
+  const [lastServerSyncTime, setLastServerSyncTime] = useState<string>('');
 
   // Initial load: Fetch server config if available to merge environment or server settings
   useEffect(() => {
@@ -262,21 +297,86 @@ export default function App() {
       .catch(() => {});
   }, []);
 
-  // Save applications to localStorage and sync to server whenever they change
+  // Fetch central shared database applications from Raspberry Pi / Server
+  const fetchApplicationsFromServer = async (silent = true) => {
+    try {
+      setServerSyncStatus('syncing');
+      const res = await fetch('/api/applications');
+      if (res.ok) {
+        const data = await res.json();
+        if (data.success && Array.isArray(data.applications)) {
+          setApplications((prevLocal) => {
+            const merged = mergeLocalAndServer(prevLocal, data.applications);
+            const sanitized = sanitizeApplications(merged);
+            try {
+              localStorage.setItem(APPS_STORAGE_KEY, JSON.stringify(sanitized));
+            } catch (e) {}
+            return sanitized;
+          });
+          setServerSyncStatus('synced');
+          setLastServerSyncTime(new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
+          if (!silent) {
+            setSyncFeedback({
+              type: 'success',
+              message: `Refreshed ${data.applications.length} applications from team server.`,
+            });
+            setTimeout(() => setSyncFeedback(null), 3000);
+          }
+        }
+      } else {
+        setServerSyncStatus('offline');
+      }
+    } catch (err) {
+      setServerSyncStatus('offline');
+    }
+  };
+
+  // Sync applications from server on mount and every 30 seconds (or on window focus)
+  useEffect(() => {
+    fetchApplicationsFromServer(true);
+    const interval = setInterval(() => {
+      fetchApplicationsFromServer(true);
+    }, 30000);
+
+    const onFocus = () => {
+      fetchApplicationsFromServer(true);
+    };
+    window.addEventListener('focus', onFocus);
+
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener('focus', onFocus);
+    };
+  }, []);
+
+  // Save applications to localStorage and sync to central server database
   useEffect(() => {
     try {
       localStorage.setItem(APPS_STORAGE_KEY, JSON.stringify(applications));
       if (applications.length > 0) {
-        fetch('/api/automation/sync-apps', {
+        fetch('/api/applications/save', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ applications }),
-        }).catch(() => {});
+          body: JSON.stringify({
+            applications,
+            userEmail: authSession?.email || 'team-member',
+            merge: true,
+          }),
+        })
+          .then((res) => {
+            if (res.ok) {
+              setServerSyncStatus('synced');
+              setLastServerSyncTime(new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
+            }
+          })
+          .catch(() => {
+            setServerSyncStatus('offline');
+          });
       }
     } catch (e) {
       console.error('Failed to save applications', e);
     }
-  }, [applications]);
+  }, [applications, authSession?.email]);
 
   // Save sheetConfig to localStorage
   const handleSaveSheetConfig = (newConfig: SheetSyncConfig) => {
@@ -364,12 +464,14 @@ export default function App() {
           spreadsheetId: sheetConfig?.spreadsheetId,
           sheetName: sheetConfig?.sheetName || 'Active CoC Applications',
           applications: applications,
+          userEmail: authSession?.email || 'team-member',
           telegramConfig: automationConfig.telegram,
           scanQuery: 'from:sirim.my OR subject:ecomm OR subject:sqas OR subject:sirim',
           options: {
-            autoScanGmail: automationConfig.autoScanGmail,
-            autoSyncSheet: automationConfig.autoSyncGoogleSheet,
-            autoSendTelegram: automationConfig.autoSendTelegram,
+            autoScanGmail: automationConfig.autoScanGmail && Boolean(authSession?.accessToken),
+            autoSyncSheet: automationConfig.autoSyncGoogleSheet && Boolean(sheetConfig?.spreadsheetId),
+            autoSendTelegram: automationConfig.autoSendTelegram && Boolean(automationConfig.telegram?.botToken && automationConfig.telegram?.chatId),
+            scanQuery: 'from:sirim.my OR subject:ecomm OR subject:sqas OR subject:sirim',
           },
         }),
       });
@@ -485,8 +587,13 @@ export default function App() {
 
       const isAlreadyRunToday = lastRunDateStr === currentDateStr;
 
-      // Check if scheduled time has arrived or passed today
-      if (!isAlreadyRunToday && !isRunningAutomation && currentTimeStr >= automationConfig.scheduleTime) {
+      const hasConfiguredService =
+        (automationConfig.autoScanGmail && Boolean(authSession?.accessToken)) ||
+        (automationConfig.autoSyncGoogleSheet && Boolean(sheetConfig?.spreadsheetId)) ||
+        (automationConfig.autoSendTelegram && Boolean(automationConfig.telegram?.botToken && automationConfig.telegram?.chatId));
+
+      // Check if scheduled time has arrived or passed today and a service is configured
+      if (!isAlreadyRunToday && !isRunningAutomation && hasConfiguredService && currentTimeStr >= automationConfig.scheduleTime) {
         console.log(`[Client Scheduler] Triggering morning automation for ${currentDateStr} at ${currentTimeStr} MYT (Scheduled: ${automationConfig.scheduleTime})`);
         handleRunAutomationNow();
       }
@@ -543,6 +650,7 @@ export default function App() {
           spreadsheetId: sheetConfig.spreadsheetId,
           sheetName: sheetConfig.sheetName || 'Active CoC Applications',
           applications: applications,
+          userEmail: authSession?.email || 'team-member',
         }),
       });
 
@@ -553,18 +661,23 @@ export default function App() {
       const updatedConfig: SheetSyncConfig = {
         ...sheetConfig,
         lastSynced: new Date().toISOString(),
-        rowsCount: applications.length + 1,
+        rowsCount: (data.applications?.length || applications.length) + 1,
       };
       handleSaveSheetConfig(updatedConfig);
 
-      // Mark all apps as synced
-      setApplications((prev) =>
-        prev.map((app) => ({
-          ...app,
-          syncedToSheet: true,
-          lastSyncedAt: new Date().toISOString(),
-        }))
-      );
+      // Merge server-stored applications if returned
+      if (Array.isArray(data.applications) && data.applications.length > 0) {
+        setApplications(sanitizeApplications(data.applications));
+      } else {
+        // Mark all apps as synced
+        setApplications((prev) =>
+          prev.map((app) => ({
+            ...app,
+            syncedToSheet: true,
+            lastSyncedAt: new Date().toISOString(),
+          }))
+        );
+      }
 
       setSyncFeedback({
         message: `Successfully synchronized ${applications.length} applications to Google Sheet!`,
@@ -586,6 +699,9 @@ export default function App() {
 
   // Toggle Action Item Checkbox
   const handleToggleActionItem = (appId: string, actionItemId: string) => {
+    const authorEmail = authSession?.email || 'team-member';
+    const nowStr = new Date().toISOString();
+
     setApplications((prev) =>
       prev.map((app) => {
         if (app.id === appId) {
@@ -595,16 +711,17 @@ export default function App() {
               return {
                 ...act,
                 isCompleted: nextState,
-                completedAt: nextState ? new Date().toISOString() : undefined,
+                completedAt: nextState ? nowStr : undefined,
               };
             }
             return act;
           });
 
-          // Check if all actions completed & status was RFI -> can suggest moving to in review
           return {
             ...app,
             actionItems: updatedActions,
+            lastModifiedBy: authorEmail,
+            lastModifiedAt: nowStr,
           };
         }
         return app;
@@ -617,12 +734,14 @@ export default function App() {
         if (!prev) return null;
         return {
           ...prev,
+          lastModifiedBy: authorEmail,
+          lastModifiedAt: nowStr,
           actionItems: prev.actionItems.map((act) =>
             act.id === actionItemId
               ? {
                   ...act,
                   isCompleted: !act.isCompleted,
-                  completedAt: !act.isCompleted ? new Date().toISOString() : undefined,
+                  completedAt: !act.isCompleted ? nowStr : undefined,
                 }
               : act
           ),
@@ -633,22 +752,32 @@ export default function App() {
 
   // Update full application from detail modal
   const handleUpdateApplication = (updatedApp: SirimApplication) => {
+    const withAttribution: SirimApplication = {
+      ...updatedApp,
+      lastModifiedBy: authSession?.email || updatedApp.lastModifiedBy || 'team-member',
+      lastModifiedAt: new Date().toISOString(),
+    };
     const prevApp = applications.find((a) => a.id === updatedApp.id);
-    setApplications((prev) => prev.map((a) => (a.id === updatedApp.id ? updatedApp : a)));
-    setSelectedApplication(updatedApp);
+    setApplications((prev) => prev.map((a) => (a.id === updatedApp.id ? withAttribution : a)));
+    setSelectedApplication(withAttribution);
 
     // If moved to RFI or Sample Requested, trigger instant alert
     if (
       (updatedApp.status === 'RFI_ACTION_REQUIRED' || updatedApp.status === 'SAMPLE_REQUESTED') &&
       prevApp?.status !== updatedApp.status
     ) {
-      sendInstantTelegramAlert(updatedApp);
+      sendInstantTelegramAlert(withAttribution);
     }
   };
 
   // Add new application from Modal / AI parser
   const handleAddApplication = (newApp: SirimApplication) => {
-    setApplications((prev) => sanitizeApplications([newApp, ...prev]));
+    const withAttribution: SirimApplication = {
+      ...newApp,
+      lastModifiedBy: authSession?.email || newApp.lastModifiedBy || 'team-member',
+      lastModifiedAt: new Date().toISOString(),
+    };
+    setApplications((prev) => sanitizeApplications([withAttribution, ...prev]));
     // If sheet configured and auto-sync active, trigger sync
     if (sheetConfig?.spreadsheetId && authSession?.accessToken) {
       setTimeout(() => handleSyncToGoogleSheet(), 500);
@@ -659,20 +788,27 @@ export default function App() {
       newApp.status === 'SAMPLE_REQUESTED' ||
       newApp.status === 'PAYMENT_PENDING'
     ) {
-      sendInstantTelegramAlert(newApp);
+      sendInstantTelegramAlert(withAttribution);
     }
   };
 
   // Import batch from Gmail scanner
   const handleImportApplications = (newApps: SirimApplication[]) => {
-    setApplications((prev) => sanitizeApplications([...newApps, ...prev]));
+    const authorEmail = authSession?.email || 'team-member';
+    const nowStr = new Date().toISOString();
+    const withAttribution = newApps.map((a) => ({
+      ...a,
+      lastModifiedBy: authorEmail,
+      lastModifiedAt: nowStr,
+    }));
+    setApplications((prev) => sanitizeApplications([...withAttribution, ...prev]));
 
     if (sheetConfig?.spreadsheetId && authSession?.accessToken) {
       setTimeout(() => handleSyncToGoogleSheet(), 500);
     }
 
     // Alert on any urgent inbound applications
-    const urgent = newApps.find(
+    const urgent = withAttribution.find(
       (a) => a.status === 'RFI_ACTION_REQUIRED' || a.status === 'SAMPLE_REQUESTED'
     );
     if (urgent) {
@@ -708,10 +844,14 @@ export default function App() {
       localStorage.removeItem('sirim_applications_data_v1');
       setSelectedApplication(null);
 
-      fetch('/api/automation/sync-apps', {
+      fetch('/api/applications/save', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ applications: [] }),
+        body: JSON.stringify({
+          applications: [],
+          merge: false,
+          userEmail: authSession?.email || 'team-member',
+        }),
       }).catch(() => {});
 
       setIsDetailModalOpen(false);
@@ -735,6 +875,11 @@ export default function App() {
         setIsDetailModalOpen(false);
         setSelectedApplication(null);
       }
+
+      fetch(`/api/applications/${encodeURIComponent(appId)}`, {
+        method: 'DELETE',
+      }).catch(() => {});
+
       notificationAudio.playSuccessTone();
       setSyncFeedback({
         type: 'success',
@@ -849,6 +994,9 @@ export default function App() {
         onOpenPreScreen={() => setIsGlobalPreScreenOpen(true)}
         isSyncingSheet={isSyncingSheet}
         isRunningAutomation={isRunningAutomation}
+        serverSyncStatus={serverSyncStatus}
+        lastServerSyncTime={lastServerSyncTime}
+        onRefreshFromServer={() => fetchApplicationsFromServer(false)}
       />
 
       {/* Main Container */}

@@ -146,6 +146,8 @@ export interface SirimApplication {
   lastSyncedAt?: string;
   sheetRowIndex?: number;
   notes?: string;
+  lastModifiedBy?: string;
+  lastModifiedAt?: string;
 }
 
 export interface SheetSyncConfig {

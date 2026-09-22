@@ -22,7 +22,7 @@ async function generateContentWithRetryAndFallback(
   primaryModel: string,
   contents: any,
   config?: any,
-  fallbackModel: string = "gemini-2.5-flash"
+  fallbackModel: string = "gemini-3.1-flash-lite"
 ) {
   const modelsToTry = [primaryModel, fallbackModel];
   let lastError: any = null;
@@ -495,6 +495,239 @@ async function startServer() {
   app.use(express.json({ limit: "15mb" }));
 
   // ----------------------------------------------------
+  // Server-side Shared Application & Automation Storage
+  // Provides central persistence on Raspberry Pi / Container so multiple users
+  // (e.g. Lead, Boss, Team) share the exact same synchronized records.
+  // ----------------------------------------------------
+  const DATA_DIR = path.join(process.cwd(), "data");
+  if (!fs.existsSync(DATA_DIR)) {
+    try {
+      fs.mkdirSync(DATA_DIR, { recursive: true });
+    } catch (e) {}
+  }
+  const CONFIG_FILE = path.join(DATA_DIR, "automation-config.json");
+  const APPS_FILE = path.join(DATA_DIR, "applications-store.json");
+
+  function getStoredAutomationConfig() {
+    const defaults = {
+      enabled: true,
+      scheduleTime: "08:30",
+      timezone: "Asia/Kuala_Lumpur",
+      intervalHours: 24,
+      autoScanGmail: true,
+      autoSyncGoogleSheet: true,
+      autoSendTelegram: true,
+      alertOnCriticalOnly: false,
+      hasCompletedFirstScan: false,
+      firstScanDurationDays: 365,
+      routineScanDurationDays: 30,
+      scanScopeMode: "auto",
+      telegram: {
+        botToken: process.env.TELEGRAM_BOT_TOKEN || "",
+        chatId: process.env.TELEGRAM_CHAT_ID || "",
+        topicId: process.env.TELEGRAM_TOPIC_ID || "",
+        enabled: true,
+        dailyDigest: true,
+        instantAlertOnCritical: true,
+      },
+      logs: [],
+    };
+
+    try {
+      if (fs.existsSync(CONFIG_FILE)) {
+        const raw = fs.readFileSync(CONFIG_FILE, "utf8");
+        const parsed = JSON.parse(raw);
+        return {
+          ...defaults,
+          ...parsed,
+          telegram: {
+            ...defaults.telegram,
+            ...(parsed.telegram || {}),
+          },
+        };
+      }
+    } catch (err) {
+      console.warn("Could not read automation-config.json:", err);
+    }
+    return defaults;
+  }
+
+  function saveStoredAutomationConfig(config: any) {
+    try {
+      fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2), "utf8");
+    } catch (err) {
+      console.error("Could not write automation-config.json:", err);
+    }
+  }
+
+  function getStoredApplications(): any[] {
+    try {
+      if (fs.existsSync(APPS_FILE)) {
+        const raw = fs.readFileSync(APPS_FILE, "utf8");
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) return parsed;
+      }
+    } catch (err) {
+      console.warn("Could not read applications-store.json:", err);
+    }
+    return [];
+  }
+
+  function saveStoredApplications(apps: any[]) {
+    try {
+      fs.writeFileSync(APPS_FILE, JSON.stringify(apps, null, 2), "utf8");
+    } catch (err) {
+      console.error("Could not write applications-store.json:", err);
+    }
+  }
+
+  /**
+   * Smart Multi-User Application List Merger:
+   * Prevents overwriting or loss of data when multiple team members (e.g. Lead, Boss)
+   * access, scan, or modify records from different browsers or Google inboxes.
+   */
+  function mergeApplicationsList(baseApps: any[], incomingApps: any[], authorEmail?: string): any[] {
+    if (!Array.isArray(baseApps)) baseApps = [];
+    if (!Array.isArray(incomingApps)) return baseApps;
+
+    const merged = [...baseApps];
+    const nowStr = new Date().toISOString();
+
+    for (const inc of incomingApps) {
+      if (!inc) continue;
+      // Match by applicationRef, or id, or threadId
+      const idx = merged.findIndex((existing) => {
+        if (inc.id && existing.id && inc.id === existing.id) return true;
+        if (
+          inc.applicationRef &&
+          existing.applicationRef &&
+          inc.applicationRef.trim().toLowerCase() === existing.applicationRef.trim().toLowerCase() &&
+          inc.applicationRef.trim() !== ""
+        )
+          return true;
+        if (inc.threadId && existing.threadId && inc.threadId === existing.threadId) return true;
+        return false;
+      });
+
+      if (idx >= 0) {
+        const existing = merged[idx];
+
+        // Merge email threads
+        const existingThreads = existing.emailThreads || [];
+        const incomingThreads = inc.emailThreads || [];
+        const mergedThreads = [...existingThreads];
+        for (const th of incomingThreads) {
+          if (!mergedThreads.some((m) => m.id === th.id || (m.messageId && m.messageId === th.messageId))) {
+            mergedThreads.push(th);
+          }
+        }
+
+        // Merge timeline
+        const existingTimeline = existing.timeline || [];
+        const incomingTimeline = inc.timeline || [];
+        const mergedTimeline = [...existingTimeline];
+        for (const tl of incomingTimeline) {
+          if (!mergedTimeline.some((t) => t.title === tl.title && t.date === tl.date)) {
+            mergedTimeline.push(tl);
+          }
+        }
+        mergedTimeline.sort((a, b) => (a.date < b.date ? -1 : 1));
+
+        // Merge action items
+        const existingActions = existing.actionItems || [];
+        const incomingActions = inc.actionItems || [];
+        const mergedActions = [...existingActions];
+        for (const act of incomingActions) {
+          const actIdx = mergedActions.findIndex(
+            (a) => (act.id && a.id === act.id) || (act.title && a.title.toLowerCase() === act.title.toLowerCase())
+          );
+          if (actIdx >= 0) {
+            mergedActions[actIdx] = { ...mergedActions[actIdx], ...act };
+          } else {
+            mergedActions.push(act);
+          }
+        }
+
+        merged[idx] = {
+          ...existing,
+          ...inc,
+          id: existing.id || inc.id,
+          emailThreads: mergedThreads,
+          timeline: mergedTimeline,
+          actionItems: mergedActions,
+          lastModifiedAt: nowStr,
+          lastModifiedBy: authorEmail || inc.lastModifiedBy || existing.lastModifiedBy || "team",
+        };
+      } else {
+        merged.push({
+          ...inc,
+          id: inc.id || `app-${Date.now()}-${Math.random().toString(36).substr(2, 6)}`,
+          lastModifiedAt: nowStr,
+          lastModifiedBy: authorEmail || inc.lastModifiedBy || "team",
+        });
+      }
+    }
+
+    return merged;
+  }
+
+  // ----------------------------------------------------
+  // Central Multi-User Applications Store Endpoints
+  // ----------------------------------------------------
+  app.get("/api/applications", (req: Request, res: Response) => {
+    try {
+      const apps = getStoredApplications();
+      res.json({
+        success: true,
+        count: apps.length,
+        applications: apps,
+        lastUpdated: fs.existsSync(APPS_FILE) ? fs.statSync(APPS_FILE).mtime.toISOString() : null,
+      });
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to load stored applications", details: e?.message });
+    }
+  });
+
+  app.post("/api/applications/save", (req: Request, res: Response) => {
+    try {
+      const { applications = [], userEmail, merge = true } = req.body;
+      if (!Array.isArray(applications)) {
+        return res.status(400).json({ error: "applications must be an array" });
+      }
+
+      let finalApps: any[];
+      if (merge) {
+        const existing = getStoredApplications();
+        finalApps = mergeApplicationsList(existing, applications, userEmail);
+      } else {
+        finalApps = applications;
+      }
+
+      saveStoredApplications(finalApps);
+      res.json({
+        success: true,
+        count: finalApps.length,
+        applications: finalApps,
+        savedAt: new Date().toISOString(),
+      });
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to save applications", details: e?.message });
+    }
+  });
+
+  app.delete("/api/applications/:id", (req: Request, res: Response) => {
+    try {
+      const { id } = req.params;
+      const existing = getStoredApplications();
+      const updated = existing.filter((a: any) => a.id !== id && a.applicationRef !== id);
+      saveStoredApplications(updated);
+      res.json({ success: true, count: updated.length, applications: updated });
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to delete application", details: e?.message });
+    }
+  });
+
+  // ----------------------------------------------------
   // Health Check
   // ----------------------------------------------------
   app.get("/api/health", (req: Request, res: Response) => {
@@ -788,7 +1021,7 @@ Return ONLY a valid JSON object matching this schema.`;
             ],
           },
         },
-        "gemini-2.5-flash"
+        "gemini-3.1-flash-lite"
       );
 
       const jsonText = response.text?.trim();
@@ -882,7 +1115,7 @@ Return a JSON with "subject", "body", and "suggestedAttachments" (array of strin
 
       const response = await generateContentWithRetryAndFallback(
         ai,
-        "gemini-3.7-flash",
+        "gemini-3.8-flash",
         prompt,
         {
           responseMimeType: "application/json",
@@ -899,7 +1132,7 @@ Return a JSON with "subject", "body", and "suggestedAttachments" (array of strin
             required: ["subject", "body", "suggestedAttachments"],
           },
         },
-        "gemini-2.5-flash"
+        "gemini-3.1-flash-lite"
       );
 
       const jsonText = response.text?.trim();
@@ -972,7 +1205,7 @@ Evaluate thoroughly and return a JSON matching the schema.`;
 
       const response = await generateContentWithRetryAndFallback(
         ai,
-        "gemini-3.7-flash",
+        "gemini-3.8-flash",
         prompt,
         {
           responseMimeType: "application/json",
@@ -1027,7 +1260,7 @@ Evaluate thoroughly and return a JSON matching the schema.`;
             ],
           },
         },
-        "gemini-2.5-flash"
+        "gemini-3.1-flash-lite"
       );
 
       const jsonText = response.text?.trim();
@@ -1324,10 +1557,21 @@ Evaluate thoroughly and return a JSON matching the schema.`;
       }
 
       const accessToken = authHeader.split(" ")[1];
-      const { spreadsheetId, applications = [], sheetName = "Active CoC Applications" } = req.body;
+      const { spreadsheetId, applications = [], sheetName = "Active CoC Applications", userEmail } = req.body;
 
       if (!spreadsheetId) {
         return res.status(400).json({ error: "spreadsheetId is required" });
+      }
+
+      // Multi-User Safeguard: Merge with server-stored applications
+      // Prevents overwriting team records if a user connects with an empty browser cache
+      const serverStoredApps = getStoredApplications();
+      let appsToSync: any[];
+      if (!Array.isArray(applications) || applications.length === 0) {
+        appsToSync = serverStoredApps;
+      } else {
+        appsToSync = mergeApplicationsList(serverStoredApps, applications, userEmail);
+        saveStoredApplications(appsToSync);
       }
 
       const oauth2Client = new google.auth.OAuth2();
@@ -1362,7 +1606,7 @@ Evaluate thoroughly and return a JSON matching the schema.`;
 
       const rowsData: any[][] = [headers];
 
-      applications.forEach((appItem: any) => {
+      appsToSync.forEach((appItem: any) => {
         const pendingActions = (appItem.actionItems || [])
           .filter((a: any) => !a.isCompleted)
           .map((a: any) => `• [${a.priority}] ${a.title}`)
@@ -1426,7 +1670,8 @@ Evaluate thoroughly and return a JSON matching the schema.`;
       res.json({
         success: true,
         spreadsheetId,
-        syncedRowsCount: applications.length,
+        syncedRowsCount: appsToSync.length,
+        applications: appsToSync,
         timestamp: new Date().toISOString(),
       });
     } catch (err: any) {
@@ -1749,91 +1994,6 @@ Evaluate thoroughly and return a JSON matching the schema.`;
   }
 
   // ----------------------------------------------------
-  // Server-side Automation & Application Storage Helpers
-  // ----------------------------------------------------
-  const DATA_DIR = path.join(process.cwd(), "data");
-  if (!fs.existsSync(DATA_DIR)) {
-    try {
-      fs.mkdirSync(DATA_DIR, { recursive: true });
-    } catch (e) {}
-  }
-  const CONFIG_FILE = path.join(DATA_DIR, "automation-config.json");
-  const APPS_FILE = path.join(DATA_DIR, "applications-store.json");
-
-  function getStoredAutomationConfig() {
-    const defaults = {
-      enabled: true,
-      scheduleTime: "08:30",
-      timezone: "Asia/Kuala_Lumpur",
-      intervalHours: 24,
-      autoScanGmail: true,
-      autoSyncGoogleSheet: true,
-      autoSendTelegram: true,
-      alertOnCriticalOnly: false,
-      hasCompletedFirstScan: false,
-      firstScanDurationDays: 365,
-      routineScanDurationDays: 30,
-      scanScopeMode: "auto",
-      telegram: {
-        botToken: process.env.TELEGRAM_BOT_TOKEN || "",
-        chatId: process.env.TELEGRAM_CHAT_ID || "",
-        topicId: process.env.TELEGRAM_TOPIC_ID || "",
-        enabled: true,
-        dailyDigest: true,
-        instantAlertOnCritical: true,
-      },
-      logs: [],
-    };
-
-    try {
-      if (fs.existsSync(CONFIG_FILE)) {
-        const raw = fs.readFileSync(CONFIG_FILE, "utf8");
-        const parsed = JSON.parse(raw);
-        return {
-          ...defaults,
-          ...parsed,
-          telegram: {
-            ...defaults.telegram,
-            ...(parsed.telegram || {}),
-          },
-        };
-      }
-    } catch (err) {
-      console.warn("Could not read automation-config.json:", err);
-    }
-    return defaults;
-  }
-
-  function saveStoredAutomationConfig(config: any) {
-    try {
-      fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2), "utf8");
-    } catch (err) {
-      console.error("Could not write automation-config.json:", err);
-    }
-  }
-
-  function getStoredApplications(): any[] {
-    try {
-      if (fs.existsSync(APPS_FILE)) {
-        const raw = fs.readFileSync(APPS_FILE, "utf8");
-        const parsed = JSON.parse(raw);
-        if (Array.isArray(parsed)) return parsed;
-      }
-    } catch (err) {
-      console.warn("Could not read applications-store.json:", err);
-    }
-    return [];
-  }
-
-  function saveStoredApplications(apps: any[]) {
-    try {
-      fs.writeFileSync(APPS_FILE, JSON.stringify(apps, null, 2), "utf8");
-    } catch (err) {
-      console.error("Could not write applications-store.json:", err);
-    }
-  }
-
-  // ----------------------------------------------------
   // 7. Telegram Bot: Raw Message Sender Helper
   // ----------------------------------------------------
   async function sendTelegramRawMessage(
@@ -2044,15 +2204,64 @@ Evaluate thoroughly and return a JSON matching the schema.`;
 
   app.post("/api/automation/sync-apps", (req: Request, res: Response) => {
     try {
-      const { applications } = req.body;
+      const { applications, userEmail } = req.body;
       if (Array.isArray(applications)) {
-        saveStoredApplications(applications);
-        res.json({ success: true, count: applications.length });
+        const current = getStoredApplications();
+        const merged = mergeApplicationsList(current, applications, userEmail);
+        saveStoredApplications(merged);
+        res.json({ success: true, count: merged.length, applications: merged });
       } else {
         res.status(400).json({ error: "Invalid applications array" });
       }
     } catch (err: any) {
       res.status(500).json({ error: "Failed to save applications", details: err?.message });
+    }
+  });
+
+  // ----------------------------------------------------
+  // Central Shared Multi-User Applications Store Endpoints
+  // ----------------------------------------------------
+  app.get("/api/applications", (req: Request, res: Response) => {
+    try {
+      const apps = getStoredApplications();
+      res.json({ success: true, applications: apps, count: apps.length });
+    } catch (err: any) {
+      res.status(500).json({ error: "Failed to retrieve applications", details: err?.message });
+    }
+  });
+
+  app.post("/api/applications/save", (req: Request, res: Response) => {
+    try {
+      const { applications, userEmail, merge = true } = req.body;
+      if (!Array.isArray(applications)) {
+        return res.status(400).json({ error: "Invalid applications array" });
+      }
+
+      let finalApps: any[] = [];
+      if (merge === false) {
+        // Complete replacement (e.g. user confirmed clearing all applications)
+        finalApps = applications;
+      } else {
+        const current = getStoredApplications();
+        finalApps = mergeApplicationsList(current, applications, userEmail);
+      }
+
+      saveStoredApplications(finalApps);
+      res.json({ success: true, count: finalApps.length, applications: finalApps });
+    } catch (err: any) {
+      res.status(500).json({ error: "Failed to save applications", details: err?.message });
+    }
+  });
+
+  app.delete("/api/applications/:id", (req: Request, res: Response) => {
+    try {
+      const targetId = req.params.id;
+      const current = getStoredApplications();
+      const filtered = current.filter((a: any) => a.id !== targetId);
+      saveStoredApplications(filtered);
+      res.json({ success: true, count: filtered.length });
+    } catch (err: any) {
+      res.status(500).json({ error: "Failed to delete application", details: err?.message });
     }
   });
 
@@ -2217,7 +2426,9 @@ Evaluate thoroughly and return a JSON matching the schema.`;
         ? (storedConfig.firstScanDurationDays || 365)
         : (storedConfig.routineScanDurationDays || 30);
 
-      let currentApplications = [...applications];
+      // Multi-User Central Store: Merge client payload with server-stored applications
+      const serverApps = getStoredApplications();
+      let currentApplications = mergeApplicationsList(serverApps, applications, req.body.userEmail);
       let newEmailsDetected = 0;
       const authHeader = req.headers.authorization;
       const accessToken = authHeader && authHeader.startsWith("Bearer ") ? authHeader.split(" ")[1] : null;
@@ -2251,10 +2462,18 @@ Evaluate thoroughly and return a JSON matching the schema.`;
           const foundThreads = searchRes.data.threads || [];
           addLog("SCAN", "SUCCESS", `Found ${foundThreads.length} email threads in Gmail within past ${scanDays} days.`);
 
-          // Process threads (up to 15 for first-time scan to build deep history, up to 8 for routine)
-          const processLimit = isFirstScan ? Math.min(foundThreads.length, 15) : Math.min(foundThreads.length, 8);
+          // Process threads (capped to ensure rapid completion without hitting proxy timeouts)
+          const processLimit = isFirstScan ? Math.min(foundThreads.length, 6) : Math.min(foundThreads.length, 5);
+          const scanStartTime = Date.now();
+          const MAX_SCAN_DURATION_MS = 25000; // Never run for more than 25s so HTTP response returns safely
+
           for (const thread of foundThreads.slice(0, processLimit)) {
             if (!thread.id) continue;
+            if (Date.now() - scanStartTime > MAX_SCAN_DURATION_MS) {
+              addLog("SCAN", "INFO", "Scan batch time limit reached; continuing with current results.");
+              break;
+            }
+
             try {
               const threadRes = await gmail.users.threads.get({
                 userId: "me",
@@ -2275,6 +2494,19 @@ Evaluate thoroughly and return a JSON matching the schema.`;
               const lastDate = lastHeaders.find((h) => h.name?.toLowerCase() === "date")?.value || "";
               const firstHeaders = firstMsg.payload?.headers || [];
               const firstDate = firstHeaders.find((h) => h.name?.toLowerCase() === "date")?.value || lastDate;
+
+              // Determine if this thread matches an existing application
+              const existingIdx = currentApplications.findIndex(
+                (a) => a.threadId === thread.id || (a.applicationRef && subject.toLowerCase().includes(a.applicationRef.toLowerCase()))
+              );
+              const existingApp = existingIdx >= 0 ? currentApplications[existingIdx] : null;
+
+              // If existing application already has all messages from this thread, skip heavy AI re-parsing
+              const existingMsgCount = existingApp?.emailThreads?.length || 0;
+              const hasNewMessages = !existingApp || messages.length > existingMsgCount || !existingApp.lastActivityDate;
+              if (existingApp && !hasNewMessages && !options.forceRefresh) {
+                continue;
+              }
 
               // Extract text across all messages in chronological sequence to understand full application progression
               const threadTranscript = messages.map((m: any, mIdx: number) => {
@@ -2297,13 +2529,7 @@ BODY:
 ${text}`;
               }).join("\n\n------------------------------------------------------------\n\n");
 
-              // Determine if this thread matches an existing application
-              const existingIdx = currentApplications.findIndex(
-                (a) => a.threadId === thread.id || (a.applicationRef && subject.toLowerCase().includes(a.applicationRef.toLowerCase()))
-              );
-              const existingApp = existingIdx >= 0 ? currentApplications[existingIdx] : null;
-
-              // Parse with AI parser / fallback heuristic parser
+              // Parse with AI parser (with 9s strict timeout) / fallback heuristic parser
               let parsed: any = null;
               try {
                 const ai = getGeminiClient();
@@ -2344,20 +2570,26 @@ CRITICAL STATUS CLASSIFICATION RULES (BASED ON THE LATEST STATE):
   SIRIM QAS has approved the application or issued the Certificate of Conformity (CoC) / Type Approval.
 
 Thread Transcript (${messages.length} messages):
-${threadTranscript.slice(0, 40000)}
+${threadTranscript.slice(0, 30000)}
 
 Return a JSON object with:
 isSirimRelated (boolean), applicationRef (string), productName (string), modelNumber (string), brand (string), applicant (string), scheme (string), status (string: 'SUBMITTED'|'UNDER_REVIEW'|'SAMPLE_REQUESTED'|'SAMPLE_SUBMITTED'|'TESTING_IN_PROGRESS'|'RFI_ACTION_REQUIRED'|'PAYMENT_PENDING'|'FINAL_EVALUATION'|'APPROVED'|'REJECTED'|'EXPIRED'), statusExplanation (string), officerName (string), officerEmail (string), processingFeeRm (number), detectedStandards (array of strings), courierTracking (string), quotationOrInvoiceNo (string), summary (string), timelineEvents (array of {date, title, description, sender, type: 'status_change'|'rfi'|'document'|'payment'|'approval'|'sample'})`;
 
-                const aiRes = await generateContentWithRetryAndFallback(
+                const aiPromise = generateContentWithRetryAndFallback(
                   ai,
                   "gemini-3.8-flash",
                   prompt,
                   {
                     responseMimeType: "application/json",
                   },
-                  "gemini-2.5-flash"
+                  "gemini-3.1-flash-lite"
                 );
+
+                const timeoutPromise = new Promise((_, reject) =>
+                  setTimeout(() => reject(new Error("Gemini thread parse timeout")), 9000)
+                );
+
+                const aiRes: any = await Promise.race([aiPromise, timeoutPromise]);
                 parsed = JSON.parse(aiRes.text?.trim() || "{}");
               } catch (parseErr) {
                 parsed = fallbackHeuristicSirimParser(subject, threadTranscript, from, lastDate);
@@ -2650,6 +2882,9 @@ isSirimRelated (boolean), applicationRef (string), productName (string), modelNu
       } else {
         addLog("TELEGRAM", "INFO", "Telegram dispatch skipped (bot token or chat ID not configured).");
       }
+
+      // Persist the combined, updated applications to central server storage
+      saveStoredApplications(currentApplications);
 
       addLog("SYSTEM", "SUCCESS", "Automated synchronization pipeline completed successfully.");
 

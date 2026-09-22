@@ -495,6 +495,21 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({
               <span>Brand: <strong>{application.brand}</strong></span>
               <span>•</span>
               <span>Applicant: <strong>{application.applicant}</strong></span>
+              {application.lastModifiedBy && (
+                <>
+                  <span>•</span>
+                  <span className="flex items-center gap-1 text-slate-300">
+                    <User className="w-3.5 h-3.5 text-indigo-400" />
+                    Last edited by: <strong className="text-white">{application.lastModifiedBy}</strong>
+                    {application.lastModifiedAt && (
+                      <span className="text-slate-400 text-[11px]">
+                        ({new Date(application.lastModifiedAt).toLocaleDateString()}{' '}
+                        {new Date(application.lastModifiedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })})
+                      </span>
+                    )}
+                  </span>
+                </>
+              )}
               {(application.supplierName || (application.supplierStatus && application.supplierStatus !== 'NOT_INVOLVED')) && (
                 <>
                   <span>•</span>
