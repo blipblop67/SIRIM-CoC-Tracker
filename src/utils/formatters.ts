@@ -240,22 +240,29 @@ export function getSupplierStatusBadgeInfo(status?: 'NOT_INVOLVED' | 'WAITING_FO
   }
 }
 
-export function getAssigneeBadgeInfo(assignee: 'APPLICANT' | 'SIRIM' | 'LAB' | 'SUPPLIER'): {
+export function getAssigneeBadgeInfo(
+  assignee: 'APPLICANT' | 'SIRIM' | 'LAB' | 'SUPPLIER',
+  isStatement = false
+): {
   label: string;
   bg: string;
   text: string;
   border: string;
 } {
-  switch (assignee) {
-    case 'APPLICANT':
-      return { label: 'Cytron Action', bg: 'bg-rose-50', text: 'text-rose-700', border: 'border-rose-200' };
-    case 'SUPPLIER':
-      return { label: 'Supplier Action', bg: 'bg-purple-50', text: 'text-purple-700', border: 'border-purple-200' };
-    case 'SIRIM':
-      return { label: 'SIRIM Action', bg: 'bg-blue-50', text: 'text-blue-700', border: 'border-blue-200' };
-    case 'LAB':
-      return { label: 'Lab Action', bg: 'bg-amber-50', text: 'text-amber-700', border: 'border-amber-200' };
+  if (isStatement || assignee !== 'APPLICANT') {
+    switch (assignee) {
+      case 'SUPPLIER':
+        return { label: 'Waiting on Supplier', bg: 'bg-purple-50', text: 'text-purple-700', border: 'border-purple-200' };
+      case 'SIRIM':
+        return { label: 'Waiting on SIRIM Reply', bg: 'bg-blue-50', text: 'text-blue-700', border: 'border-blue-200' };
+      case 'LAB':
+        return { label: 'Waiting on Lab Report', bg: 'bg-amber-50', text: 'text-amber-700', border: 'border-amber-200' };
+      case 'APPLICANT':
+        return { label: 'Cytron Action', bg: 'bg-rose-50', text: 'text-rose-700', border: 'border-rose-200' };
+    }
   }
+
+  return { label: 'Cytron Action', bg: 'bg-rose-50', text: 'text-rose-700', border: 'border-rose-200' };
 }
 
 export function getGmailThreadUrl(app: {

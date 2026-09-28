@@ -15,11 +15,22 @@ import {
   Calendar,
   History,
   Check,
+  ShieldCheck,
+  Filter,
+  CheckSquare,
+  Square,
 } from 'lucide-react';
 import confetti from 'canvas-confetti';
 import { UserAuthSession, SirimApplication, ActionItem, TimelineEvent, ScanDurationPreset } from '../types';
 import { notificationAudio } from '../utils/audio';
 import { safeFetchJson } from '../utils/api';
+import {
+  isOutOfOfficeSubject,
+  isOutOfOfficeText,
+  isUnrelatedEmail,
+  isSirimRegulatoryThread,
+  GMAIL_OOO_EXCLUSION_QUERY,
+} from '../utils/outOfOffice';
 
 interface GmailScannerModalProps {
   isOpen: boolean;
@@ -34,8 +45,19 @@ interface ThreadSummary {
   subject: string;
   from: string;
   date: string;
+  firstDate?: string;
   snippet: string;
   messageCount: number;
+  mainSubject?: string;
+  mainFrom?: string;
+  mainDate?: string;
+  mainSnippet?: string;
+  latestSubject?: string;
+  latestFrom?: string;
+  latestDate?: string;
+  latestSnippet?: string;
+  isVerifiedSirim?: boolean;
+  relevanceScore?: number;
 }
 
 export const GmailScannerModal: React.FC<GmailScannerModalProps> = ({
@@ -52,6 +74,8 @@ export const GmailScannerModal: React.FC<GmailScannerModalProps> = ({
   );
   const [durationPreset, setDurationPreset] = useState<ScanDurationPreset>('1y');
   const [customDays, setCustomDays] = useState<number>(365);
+  const [maxScanLimit, setMaxScanLimit] = useState<number>(50); // 25, 50, 100
+  const [filterUnrelated, setFilterUnrelated] = useState<boolean>(true); // Filter out non-SIRIM noise
   const [isScanning, setIsScanning] = useState(false);
   const [threads, setThreads] = useState<ThreadSummary[]>([]);
   const [selectedThreadIds, setSelectedThreadIds] = useState<Set<string>>(new Set());
@@ -98,6 +122,11 @@ export const GmailScannerModal: React.FC<GmailScannerModalProps> = ({
     setSelectedThreadIds(new Set());
 
     try {
+      let finalQuery = activeQuery.trim();
+      if (!finalQuery.includes('out of office')) {
+        finalQuery = `(${finalQuery}) ${GMAIL_OOO_EXCLUSION_QUERY}`;
+      }
+
       const data = await safeFetchJson<any>('/api/gmail/search', {
         method: 'POST',
         headers: {
@@ -105,10 +134,11 @@ export const GmailScannerModal: React.FC<GmailScannerModalProps> = ({
           Authorization: `Bearer ${authSession.accessToken}`,
         },
         body: JSON.stringify({
-          query: activeQuery,
-          maxResults: effectiveDays > 60 ? 35 : 20,
+          query: finalQuery,
+          maxResults: maxScanLimit,
           daysBack: effectiveDays,
           scope: activePreset === '1y' ? 'first_time' : activePreset === '1m' ? 'routine' : 'custom',
+          filterUnrelated,
         }),
       });
 
@@ -116,13 +146,32 @@ export const GmailScannerModal: React.FC<GmailScannerModalProps> = ({
         throw new Error(data.error || 'Failed to search Gmail');
       }
 
-      setThreads(data.threads || []);
+      // Strictly filter out Out-of-Office, auto-reply, and automated status emails
+      let validThreads: ThreadSummary[] = (data.threads || []).filter(
+        (t: ThreadSummary) =>
+          !isOutOfOfficeSubject(t.subject) &&
+          !isOutOfOfficeSubject(t.mainSubject) &&
+          !isOutOfOfficeText(t.snippet)
+      );
+
+      // If user enabled filterUnrelated, apply client-side guarantee as well
+      if (filterUnrelated) {
+        validThreads = validThreads.filter((t: ThreadSummary) => {
+          if (t.isVerifiedSirim === false) return false;
+          if (isUnrelatedEmail({ subject: t.mainSubject || t.subject, from: t.mainFrom || t.from, snippet: t.snippet })) {
+            return false;
+          }
+          return true;
+        });
+      }
+
+      setThreads(validThreads);
       // Auto select first 4 by default
       const initialSelected = new Set<string>();
-      (data.threads || []).slice(0, 4).forEach((t: ThreadSummary) => initialSelected.add(t.id));
+      validThreads.slice(0, 4).forEach((t: ThreadSummary) => initialSelected.add(t.id));
       setSelectedThreadIds(initialSelected);
 
-      if ((data.threads || []).length === 0) {
+      if (validThreads.length === 0) {
         setErrorMsg(`No matching SIRIM or e-ComM email threads found within the past ${effectiveDays} days.`);
       }
     } catch (err: any) {
@@ -138,6 +187,14 @@ export const GmailScannerModal: React.FC<GmailScannerModalProps> = ({
     if (next.has(id)) next.delete(id);
     else next.add(id);
     setSelectedThreadIds(next);
+  };
+
+  const handleSelectAll = () => {
+    if (selectedThreadIds.size === threads.length) {
+      setSelectedThreadIds(new Set());
+    } else {
+      setSelectedThreadIds(new Set(threads.map((t) => t.id)));
+    }
   };
 
   const handleProcessSelected = async () => {
@@ -170,17 +227,21 @@ export const GmailScannerModal: React.FC<GmailScannerModalProps> = ({
         if (!threadData.success || !threadData.messages) continue;
 
         const messages = threadData.messages;
-        const lastMessage = messages[messages.length - 1] || {};
-        const firstMessage = messages[0] || lastMessage;
+        if (messages.length === 0) continue;
+
+        // Message 1 is the MAIN THREAD / original application message
+        const firstMessage = messages[0] || {};
+        // Message N is the LATEST UPDATE in the thread
+        const lastMessage = messages[messages.length - 1] || firstMessage;
 
         // Construct full chronological thread transcript with explicit boundary tags
         const threadTranscript = messages.map((m: any, idx: number) => {
           const isLatest = idx === messages.length - 1;
           const isFirst = idx === 0;
-          const tag = isLatest
-            ? ' [LATEST MESSAGE IN THREAD - DETERMINES CURRENT STATUS]'
-            : isFirst
-            ? ' [INITIAL APPLICATION MESSAGE]'
+          const tag = isFirst
+            ? ' [MAIN APPLICATION THREAD / INITIAL SUBMISSION - CONTAINS APPLICATION REF, PRODUCT NAME & MODEL]'
+            : isLatest
+            ? ' [LATEST MESSAGE IN THREAD - DETERMINES CURRENT STATUS & REQUIRED NEXT ACTION]'
             : '';
           const content = (m.bodyText || m.snippet || '').trim();
           return `=== MESSAGE ${idx + 1} OF ${messages.length}${tag} ===\nFROM: ${m.from || 'Unknown'}\nTO: ${m.to || 'Recipient'}\nDATE: ${m.date || 'Unknown'}\nSUBJECT: ${m.subject || ''}\n\nCONTENT:\n${content || '(No text content)'}`;
@@ -191,20 +252,41 @@ export const GmailScannerModal: React.FC<GmailScannerModalProps> = ({
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            emailSubject: lastMessage.subject || '',
+            emailSubject: firstMessage.subject || lastMessage.subject || '',
+            mainSubject: firstMessage.subject || '',
+            mainSender: firstMessage.from || '',
+            latestSubject: lastMessage.subject || '',
+            latestSender: lastMessage.from || '',
+            sender: firstMessage.from || lastMessage.from || '',
+            date: lastMessage.date || firstMessage.date || '',
+            firstDate: firstMessage.date || '',
             emailBody: threadTranscript,
-            sender: lastMessage.from || '',
-            date: lastMessage.date || '',
           }),
         });
 
         if (parseData.success && parseData.data) {
           const aiResult = parseData.data;
 
+          // Strictly exclude non-SIRIM and Out-of-Office auto-replies
+          if (aiResult.isSirimRelated === false || aiResult.isOutOfOffice === true) {
+            console.log(`[Gmail Scanner] Skipped non-SIRIM or Out-of-Office thread: ${threadId}`);
+            continue;
+          }
+          if (
+            isOutOfOfficeSubject(aiResult.productName) ||
+            isOutOfOfficeSubject(aiResult.applicationRef) ||
+            isOutOfOfficeSubject(firstMessage.subject) ||
+            isOutOfOfficeText(aiResult.notes)
+          ) {
+            console.log(`[Gmail Scanner] Skipped Out-of-Office subject/notes thread: ${threadId}`);
+            continue;
+          }
+
           const actionItems: ActionItem[] = (aiResult.actionItems || []).map((a: any, idx: number) => ({
             id: `act-${threadId}-${idx}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
             title: a.title,
             description: a.description,
+            itemCategory: a.itemCategory || (a.assignedTo === 'APPLICANT' ? 'ACTION_REQUIRED' : 'PENDING_STATEMENT'),
             assignedTo: a.assignedTo || 'APPLICANT',
             dueDate: a.dueDate || undefined,
             isCompleted: false,
@@ -239,11 +321,45 @@ export const GmailScannerModal: React.FC<GmailScannerModalProps> = ({
             ];
           }
 
+          // Clean main thread subject
+          const cleanMainSubject = (firstMessage.subject || lastMessage.subject || '')
+            .replace(/^(?:re|fwd|fw):\s*/gi, '')
+            .trim();
+
+          const resolvedProductName =
+            aiResult.productName && !aiResult.productName.toLowerCase().startsWith('re:')
+              ? aiResult.productName
+              : cleanMainSubject.length > 3
+              ? cleanMainSubject
+              : `SIRIM Equipment (${aiResult.modelNumber || 'CYT-GEN'})`;
+
+          // Tag email messages with role and main thread flag
+          const enhancedEmailThreads = messages.map((m: any, mIdx: number) => {
+            const isFirst = mIdx === 0;
+            const isLatest = mIdx === messages.length - 1;
+            let role = m.senderRole || 'UNKNOWN';
+            const fromLower = (m.from || '').toLowerCase();
+            if (fromLower.includes('sirim.my') || fromLower.includes('mcmc.gov.my')) {
+              role = 'SIRIM_OFFICER';
+            } else if (fromLower.includes('cytron')) {
+              role = 'APPLICANT';
+            } else if (aiResult.supplierEmail && fromLower.includes(aiResult.supplierEmail.toLowerCase())) {
+              role = 'SUPPLIER';
+            }
+
+            return {
+              ...m,
+              isMainThread: isFirst,
+              isLatestMessage: isLatest,
+              senderRole: role,
+            };
+          });
+
           const newApp: SirimApplication = {
             id: `sirim-${threadId}`,
             threadId,
             applicationRef: aiResult.applicationRef || `SQAS/GEN/${Date.now().toString().slice(-4)}`,
-            productName: aiResult.productName || lastMessage.subject,
+            productName: resolvedProductName,
             modelNumber: aiResult.modelNumber || 'GEN-MODEL-01',
             brand: aiResult.brand || 'Cytron',
             applicant: aiResult.applicant || 'Cytron Technologies Sdn Bhd',
@@ -261,11 +377,11 @@ export const GmailScannerModal: React.FC<GmailScannerModalProps> = ({
             standards: aiResult.detectedStandards || [],
             courierTracking: aiResult.courierTracking || undefined,
             notes: aiResult.statusExplanation ? `${aiResult.statusExplanation} — ${aiResult.summary || ''}` : (aiResult.summary || ''),
-            emailSubject: lastMessage.subject || `SIRIM / e-ComM Correspondence (${aiResult.applicationRef || 'Update'})`,
+            emailSubject: firstMessage.subject || lastMessage.subject || `SIRIM / e-ComM Correspondence (${aiResult.applicationRef || 'Update'})`,
             gmailThreadLink: `https://mail.google.com/mail/u/0/#all/${threadId}`,
             actionItems,
             timeline,
-            emailThreads: messages,
+            emailThreads: enhancedEmailThreads,
             syncedToSheet: false,
           };
 
@@ -444,9 +560,28 @@ export const GmailScannerModal: React.FC<GmailScannerModalProps> = ({
 
           {/* Query Bar */}
           <div className="bg-white border border-slate-200 rounded-xl p-3.5 space-y-2.5 shadow-xs">
-            <label className="text-xs font-bold text-slate-700 block">
-              Search Filter / Query
-            </label>
+            <div className="flex items-center justify-between flex-wrap gap-2">
+              <label className="text-xs font-bold text-slate-700 block">
+                Search Filter / Query
+              </label>
+              <div className="flex items-center gap-2">
+                {/* Unrelated Filter Toggle */}
+                <button
+                  type="button"
+                  onClick={() => setFilterUnrelated(!filterUnrelated)}
+                  className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-semibold transition-all border ${
+                    filterUnrelated
+                      ? 'bg-emerald-50 text-emerald-800 border-emerald-300 ring-1 ring-emerald-400/30'
+                      : 'bg-slate-100 text-slate-600 border-slate-200 hover:bg-slate-200'
+                  }`}
+                  title="Filter out newsletters, marketing emails, and non-regulatory noise"
+                >
+                  <ShieldCheck className={`w-3.5 h-3.5 ${filterUnrelated ? 'text-emerald-600' : 'text-slate-400'}`} />
+                  <span>{filterUnrelated ? 'Filtering Unrelated & OOO' : 'Include All Gmail Matches'}</span>
+                </button>
+              </div>
+            </div>
+
             <div className="flex gap-2">
               <div className="relative flex-1">
                 <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
@@ -461,27 +596,48 @@ export const GmailScannerModal: React.FC<GmailScannerModalProps> = ({
               <button
                 onClick={() => handleScan()}
                 disabled={isScanning || !authSession?.isAuthenticated}
-                className="flex items-center gap-1.5 px-4 py-2 text-xs font-bold text-white bg-sky-600 hover:bg-sky-500 rounded-lg shadow-sm transition-all disabled:opacity-50"
+                className="flex items-center gap-1.5 px-4 py-2 text-xs font-bold text-white bg-sky-600 hover:bg-sky-500 rounded-lg shadow-sm transition-all disabled:opacity-50 shrink-0"
               >
                 <RefreshCw className={`w-3.5 h-3.5 ${isScanning ? 'animate-spin' : ''}`} />
                 <span>{isScanning ? 'Scanning...' : `Scan (${activeDays}d)`}</span>
               </button>
             </div>
 
-            {/* Presets */}
-            <div className="flex flex-wrap gap-1.5 pt-1">
-              {presets.map((p, idx) => (
-                <button
-                  key={idx}
-                  onClick={() => {
-                    setQuery(p.q);
-                    handleScan(p.q);
-                  }}
-                  className="px-2.5 py-1 rounded text-[11px] font-medium bg-slate-100 text-slate-700 hover:bg-sky-50 hover:text-sky-700 hover:border-sky-200 border border-slate-200 transition-colors"
-                >
-                  {p.label}
-                </button>
-              ))}
+            {/* Presets and Scan Capacity */}
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pt-1 border-t border-slate-100">
+              <div className="flex flex-wrap gap-1.5">
+                {presets.map((p, idx) => (
+                  <button
+                    key={idx}
+                    onClick={() => {
+                      setQuery(p.q);
+                      handleScan(p.q);
+                    }}
+                    className="px-2.5 py-1 rounded text-[11px] font-medium bg-slate-100 text-slate-700 hover:bg-sky-50 hover:text-sky-700 hover:border-sky-200 border border-slate-200 transition-colors"
+                  >
+                    {p.label}
+                  </button>
+                ))}
+              </div>
+
+              {/* Max Emails Capacity Selector */}
+              <div className="flex items-center gap-1 shrink-0 text-[11px] text-slate-500 font-medium">
+                <span>Max:</span>
+                {[25, 50, 100].map((limit) => (
+                  <button
+                    key={limit}
+                    type="button"
+                    onClick={() => setMaxScanLimit(limit)}
+                    className={`px-2 py-0.5 rounded text-[11px] font-semibold border transition-all ${
+                      maxScanLimit === limit
+                        ? 'bg-sky-600 text-white border-sky-600 shadow-xs'
+                        : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'
+                    }`}
+                  >
+                    {limit}
+                  </button>
+                ))}
+              </div>
             </div>
           </div>
 
@@ -489,25 +645,52 @@ export const GmailScannerModal: React.FC<GmailScannerModalProps> = ({
           {threads.length > 0 && (
             <div className="space-y-2">
               <div className="flex items-center justify-between text-xs text-slate-600 px-1">
-                <span className="font-bold text-slate-800">
-                  Found {threads.length} Relevant Threads (Past {activeDays} Days)
+                <span className="font-bold text-slate-800 flex items-center gap-2">
+                  <span>Found {threads.length} Relevant Threads (Past {activeDays} Days)</span>
+                  {filterUnrelated && (
+                    <span className="px-1.5 py-0.2 rounded text-[10px] bg-emerald-100 text-emerald-800 font-medium border border-emerald-200">
+                      Unrelated Filtered
+                    </span>
+                  )}
                 </span>
-                <span className="text-sky-700 font-medium">
-                  {selectedThreadIds.size} selected for AI analysis
-                </span>
+                <div className="flex items-center gap-3">
+                  <button
+                    type="button"
+                    onClick={handleSelectAll}
+                    className="text-xs font-semibold text-sky-700 hover:text-sky-800 flex items-center gap-1"
+                  >
+                    {selectedThreadIds.size === threads.length ? (
+                      <>
+                        <CheckSquare className="w-3.5 h-3.5" />
+                        <span>Deselect All</span>
+                      </>
+                    ) : (
+                      <>
+                        <Square className="w-3.5 h-3.5" />
+                        <span>Select All ({threads.length})</span>
+                      </>
+                    )}
+                  </button>
+                  <span className="text-slate-400">|</span>
+                  <span className="text-sky-700 font-bold">
+                    {selectedThreadIds.size} selected
+                  </span>
+                </div>
               </div>
 
-              <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
+              <div className="space-y-2.5 max-h-72 overflow-y-auto pr-1">
                 {threads.map((thread) => {
                   const isSelected = selectedThreadIds.has(thread.id);
+                  const isMultiMsg = thread.messageCount > 1;
+
                   return (
                     <div
                       key={thread.id}
                       onClick={() => toggleSelectThread(thread.id)}
-                      className={`p-3 rounded-xl border transition-all cursor-pointer flex items-start gap-3 ${
+                      className={`p-3.5 rounded-xl border transition-all cursor-pointer flex items-start gap-3 ${
                         isSelected
-                          ? 'bg-sky-50/70 border-sky-300 ring-1 ring-sky-400/30'
-                          : 'bg-white border-slate-200 hover:border-slate-300'
+                          ? 'bg-sky-50/80 border-sky-400 ring-1 ring-sky-400/40 shadow-xs'
+                          : 'bg-white border-slate-200 hover:border-slate-300 shadow-2xs'
                       }`}
                     >
                       <input
@@ -516,11 +699,29 @@ export const GmailScannerModal: React.FC<GmailScannerModalProps> = ({
                         onChange={() => toggleSelectThread(thread.id)}
                         className="mt-1 h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-500 cursor-pointer"
                       />
-                      <div className="flex-1 min-w-0 space-y-1">
+                      <div className="flex-1 min-w-0 space-y-1.5">
+                        {/* Header Row: Sender + Message Count Badge + Date */}
                         <div className="flex items-center justify-between gap-2">
-                          <span className="text-xs font-bold text-slate-900 truncate">
-                            {thread.from}
-                          </span>
+                          <div className="flex items-center gap-2 flex-wrap min-w-0">
+                            <span className="text-xs font-bold text-slate-900 truncate">
+                              {thread.mainFrom || thread.from}
+                            </span>
+                            {isMultiMsg ? (
+                              <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-bold bg-sky-100 text-sky-800 border border-sky-200">
+                                <Layers className="w-2.5 h-2.5" />
+                                Thread ({thread.messageCount} emails)
+                              </span>
+                            ) : (
+                              <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-slate-100 text-slate-600">
+                                Single Email
+                              </span>
+                            )}
+                            {thread.isVerifiedSirim && (
+                              <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-emerald-100 text-emerald-800 border border-emerald-200">
+                                Verified SIRIM
+                              </span>
+                            )}
+                          </div>
                           <span className="text-[11px] text-slate-400 font-medium shrink-0">
                             {new Date(thread.date).toLocaleDateString('en-MY', {
                               day: '2-digit',
@@ -529,10 +730,38 @@ export const GmailScannerModal: React.FC<GmailScannerModalProps> = ({
                             })}
                           </span>
                         </div>
-                        <h5 className="text-xs font-semibold text-slate-800 line-clamp-1">
-                          {thread.subject}
-                        </h5>
-                        <p className="text-xs text-slate-500 line-clamp-1">{thread.snippet}</p>
+
+                        {/* Main Thread (First Email) */}
+                        <div className="space-y-0.5">
+                          <div className="flex items-start gap-1.5">
+                            <span className="text-[9px] font-bold tracking-wide uppercase px-1 py-0.5 rounded bg-indigo-50 text-indigo-700 border border-indigo-200 shrink-0 mt-0.5">
+                              Main Thread #1
+                            </span>
+                            <h5 className="text-xs font-bold text-slate-900 line-clamp-1">
+                              {thread.mainSubject || thread.subject}
+                            </h5>
+                          </div>
+                          <p className="text-xs text-slate-600 line-clamp-1 pl-0.5">
+                            {thread.mainSnippet || thread.snippet}
+                          </p>
+                        </div>
+
+                        {/* Latest Follow-Up / Reply in Thread (if more than 1 email) */}
+                        {isMultiMsg && (
+                          <div className="mt-1 pt-1.5 border-t border-slate-100 bg-slate-50/80 p-2 rounded-lg text-xs space-y-0.5">
+                            <div className="flex items-center justify-between text-[10px] text-slate-500 font-medium">
+                              <span className="flex items-center gap-1 font-semibold text-sky-800">
+                                <span className="text-sky-500 font-bold">↳</span> Latest Activity (Email #{thread.messageCount}):
+                              </span>
+                              <span className="text-slate-400">
+                                from {thread.latestFrom || thread.from}
+                              </span>
+                            </div>
+                            <p className="text-[11px] text-slate-700 line-clamp-1 italic">
+                              "{thread.latestSnippet || thread.snippet}"
+                            </p>
+                          </div>
+                        )}
                       </div>
                     </div>
                   );

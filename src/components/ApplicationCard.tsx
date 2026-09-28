@@ -27,6 +27,7 @@ import {
   getSupplierStatusBadgeInfo,
   getAssigneeBadgeInfo,
 } from '../utils/formatters';
+import { separateActionItems, getActionLabelInfo, isPendingStatement } from '../utils/actionItemUtils';
 import { Mail, Trash2, Building2 } from 'lucide-react';
 
 interface ApplicationCardProps {
@@ -67,8 +68,9 @@ export const ApplicationCard: React.FC<ApplicationCardProps> = ({
     setTimeout(() => setCopiedRef(false), 2000);
   };
 
-  const pendingActions = application.actionItems.filter((a) => !a.isCompleted);
-  const criticalAction = pendingActions.find((a) => a.priority === 'CRITICAL');
+  const incompleteItems = application.actionItems.filter((a) => !a.isCompleted);
+  const { activeActions, pendingStatements } = separateActionItems(incompleteItems);
+  const criticalAction = activeActions.find((a) => a.priority === 'CRITICAL');
 
   return (
     <div
@@ -202,65 +204,106 @@ export const ApplicationCard: React.FC<ApplicationCardProps> = ({
           </div>
         )}
 
-        {/* Pending Action Items Box */}
-        {pendingActions.length > 0 && (
-          <div className="bg-slate-50 border border-slate-200 rounded-lg p-2.5 space-y-1.5">
+        {/* Action Items & Pending Statements Box */}
+        {incompleteItems.length > 0 && (
+          <div
+            className={`border rounded-lg p-2.5 space-y-2 ${
+              activeActions.length > 0
+                ? 'bg-amber-50/50 border-amber-200/80'
+                : 'bg-purple-50/50 border-purple-200/80'
+            }`}
+          >
+            {/* Header distinguishes Active Action vs Pending Statement */}
             <div className="flex items-center justify-between text-xs">
-              <span className="font-semibold text-slate-700 flex items-center gap-1">
-                <AlertTriangle className="w-3.5 h-3.5 text-amber-600" />
-                Pending Actions ({pendingActions.length})
+              <span className="font-semibold flex items-center gap-1.5">
+                {activeActions.length > 0 ? (
+                  <>
+                    <AlertTriangle className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+                    <span className="text-amber-900">
+                      Action Required ({activeActions.length})
+                    </span>
+                  </>
+                ) : (
+                  <>
+                    <Clock className="w-3.5 h-3.5 text-purple-600 shrink-0" />
+                    <span className="text-purple-900">
+                      Pending Statement ({pendingStatements.length})
+                    </span>
+                  </>
+                )}
               </span>
-              <span className="text-[11px] text-slate-500 font-medium">
-                {pendingActions.some((a) => a.assignedTo === 'SUPPLIER')
-                  ? 'Awaiting Supplier'
-                  : pendingActions.some((a) => a.assignedTo === 'APPLICANT')
-                  ? 'Cytron Action'
-                  : 'SIRIM Action'}
-              </span>
+
+              <div className="flex items-center gap-1">
+                {activeActions.length > 0 && pendingStatements.length > 0 && (
+                  <span className="text-[10px] font-semibold px-1.5 py-0.2 rounded bg-purple-100 text-purple-800 border border-purple-200">
+                    +{pendingStatements.length} waiting
+                  </span>
+                )}
+                <span className="text-[11px] text-slate-500 font-medium">
+                  {activeActions.length > 0
+                    ? 'Cytron Action'
+                    : pendingStatements.some((a) => a.assignedTo === 'SUPPLIER')
+                    ? 'Waiting on Supplier'
+                    : pendingStatements.some((a) => a.assignedTo === 'SIRIM')
+                    ? 'Waiting on SIRIM'
+                    : 'Waiting on Lab'}
+                </span>
+              </div>
             </div>
 
-            <div className="space-y-1">
-              {pendingActions.slice(0, 2).map((action) => {
+            <div className="space-y-1.5">
+              {incompleteItems.slice(0, 2).map((action) => {
                 const pInfo = getPriorityBadge(action.priority);
-                const aInfo = getAssigneeBadgeInfo(action.assignedTo);
+                const labelInfo = getActionLabelInfo(action);
+                const isStmt = labelInfo.isPendingStatement;
+
                 return (
                   <div
                     key={action.id}
                     onClick={(e) => e.stopPropagation()}
-                    className="flex items-start gap-2 text-xs bg-white p-1.5 rounded border border-slate-200/80"
+                    className={`flex items-start gap-2 text-xs p-2 rounded-lg border transition-all ${
+                      isStmt
+                        ? 'bg-white/95 border-purple-200/70 shadow-2xs'
+                        : 'bg-white border-amber-200/80 shadow-2xs'
+                    }`}
                   >
                     <input
                       type="checkbox"
                       checked={action.isCompleted}
                       onChange={() => onToggleActionItem(application.id, action.id)}
-                      className="mt-0.5 h-3.5 w-3.5 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 cursor-pointer"
+                      className={`mt-0.5 h-3.5 w-3.5 rounded cursor-pointer ${
+                        isStmt
+                          ? 'border-purple-300 text-purple-600 focus:ring-purple-500'
+                          : 'border-amber-300 text-amber-600 focus:ring-amber-500'
+                      }`}
+                      title={isStmt ? "Mark statement as resolved/received" : "Mark action as completed"}
                     />
                     <div className="flex-1 min-w-0">
-                      <p className="font-medium text-slate-800 line-clamp-1">{action.title}</p>
-                      <div className="flex items-center gap-1.5 mt-0.5 flex-wrap">
+                      <div className="flex items-center gap-1.5 flex-wrap mb-0.5">
                         <span
-                          className={`text-[10px] font-bold px-1 rounded border ${pInfo.bg} ${pInfo.text} ${pInfo.border}`}
+                          className={`text-[9px] font-bold px-1.5 py-0.2 rounded border ${labelInfo.tagClass}`}
+                        >
+                          {isStmt ? labelInfo.shortLabel : 'Action Required'}
+                        </span>
+                        <span
+                          className={`text-[9px] font-bold px-1 rounded border ${pInfo.bg} ${pInfo.text} ${pInfo.border}`}
                         >
                           {action.priority}
                         </span>
-                        <span
-                          className={`text-[10px] font-medium px-1 rounded border ${aInfo.bg} ${aInfo.text} ${aInfo.border}`}
-                        >
-                          {aInfo.label}
-                        </span>
                         {action.dueDate && (
-                          <span className="text-[10px] text-slate-500">
-                            Due: {formatDate(action.dueDate)}
+                          <span className="text-[10px] text-slate-500 ml-auto font-mono">
+                            {formatDate(action.dueDate)}
                           </span>
                         )}
                       </div>
+                      <p className="font-medium text-slate-800 line-clamp-1">{action.title}</p>
                     </div>
                   </div>
                 );
               })}
-              {pendingActions.length > 2 && (
-                <div className="text-[11px] text-slate-500 text-center font-medium">
-                  +{pendingActions.length - 2} more action items
+              {incompleteItems.length > 2 && (
+                <div className="text-[11px] text-slate-500 text-center font-medium pt-0.5">
+                  +{incompleteItems.length - 2} more items
                 </div>
               )}
             </div>
@@ -296,7 +339,7 @@ export const ApplicationCard: React.FC<ApplicationCardProps> = ({
         </div>
 
         <div className="flex items-center gap-1.5 shrink-0" onClick={(e) => e.stopPropagation()}>
-          {pendingActions.length > 0 && (
+          {incompleteItems.length > 0 && (
             <button
               onClick={() => onQuickDraftReply(application)}
               className="flex items-center gap-1 px-2.5 py-1 text-xs font-semibold text-indigo-700 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 rounded-md transition-colors shadow-2xs"

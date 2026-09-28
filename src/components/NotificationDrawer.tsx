@@ -18,6 +18,7 @@ import {
   calculateDeadlineInfo,
   formatDate,
 } from '../utils/formatters';
+import { isActionRequired, isPendingStatement, getActionLabelInfo } from '../utils/actionItemUtils';
 import { notificationAudio } from '../utils/audio';
 
 interface NotificationDrawerProps {
@@ -40,6 +41,7 @@ export const NotificationDrawer: React.FC<NotificationDrawerProps> = ({
   if (!isOpen) return null;
 
   const [soundEnabled, setSoundEnabled] = useState(true);
+  const [filterType, setFilterType] = useState<'ALL' | 'ACTIONS' | 'STATEMENTS'>('ALL');
 
   // Flatten and sort pending actions across all applications
   const allPendingActions: {
@@ -71,7 +73,9 @@ export const NotificationDrawer: React.FC<NotificationDrawerProps> = ({
     return new Date(a.action.dueDate).getTime() - new Date(b.action.dueDate).getTime();
   });
 
-  const criticalCount = allPendingActions.filter((i) => i.action.priority === 'CRITICAL').length;
+  const activeActionsCount = allPendingActions.filter((i) => isActionRequired(i.action)).length;
+  const pendingStatementsCount = allPendingActions.filter((i) => isPendingStatement(i.action)).length;
+  const criticalCount = allPendingActions.filter((i) => i.action.priority === 'CRITICAL' && isActionRequired(i.action)).length;
 
   const handleActionCheck = (appId: string, actionId: string) => {
     if (soundEnabled) {
@@ -79,6 +83,12 @@ export const NotificationDrawer: React.FC<NotificationDrawerProps> = ({
     }
     onToggleActionItem(appId, actionId);
   };
+
+  const displayedItems = allPendingActions.filter((i) => {
+    if (filterType === 'ACTIONS') return isActionRequired(i.action);
+    if (filterType === 'STATEMENTS') return isPendingStatement(i.action);
+    return true;
+  });
 
   return (
     <div className="fixed inset-0 z-50 overflow-hidden bg-slate-950/60 backdrop-blur-xs">
@@ -97,11 +107,11 @@ export const NotificationDrawer: React.FC<NotificationDrawerProps> = ({
                 <h3 className="text-base font-bold text-white flex items-center gap-2">
                   Action Center & Alerts
                   <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-500 text-slate-950">
-                    {allPendingActions.length} Pending
+                    {activeActionsCount} Actions • {pendingStatementsCount} Waiting
                   </span>
                 </h3>
                 <p className="text-xs text-slate-400">
-                  Regulatory deadlines, RFI queries, and action triggers
+                  Active team tasks and external counterparty waiting statements
                 </p>
               </div>
             </div>
@@ -113,25 +123,63 @@ export const NotificationDrawer: React.FC<NotificationDrawerProps> = ({
             </button>
           </div>
 
-          {/* Subheader Toolbar */}
-          <div className="p-3 bg-slate-50 border-b border-slate-200 flex items-center justify-between text-xs text-slate-600 shrink-0">
-            <div className="flex items-center gap-1.5">
-              {criticalCount > 0 ? (
-                <span className="inline-flex items-center gap-1 font-bold text-rose-700">
-                  <ShieldAlert className="w-4 h-4 text-rose-600" />
-                  {criticalCount} Critical action item{criticalCount > 1 ? 's' : ''} require immediate attention
-                </span>
-              ) : (
-                <span>All actions on schedule</span>
-              )}
+          {/* Subheader Toolbar & Filter Pills */}
+          <div className="p-3 bg-slate-50 border-b border-slate-200 flex flex-col gap-2 shrink-0">
+            <div className="flex items-center justify-between text-xs text-slate-600">
+              <div className="flex items-center gap-1.5">
+                {criticalCount > 0 ? (
+                  <span className="inline-flex items-center gap-1 font-bold text-rose-700">
+                    <ShieldAlert className="w-4 h-4 text-rose-600" />
+                    {criticalCount} Critical action{criticalCount > 1 ? 's' : ''} require attention
+                  </span>
+                ) : (
+                  <span>All active actions on schedule</span>
+                )}
+              </div>
+              <button
+                onClick={() => setSoundEnabled(!soundEnabled)}
+                className="p-1 text-slate-500 hover:text-slate-800 rounded transition-colors"
+                title={soundEnabled ? 'Mute Alert Sounds' : 'Enable Alert Sounds'}
+              >
+                {soundEnabled ? <Volume2 className="w-4 h-4 text-blue-600" /> : <VolumeX className="w-4 h-4" />}
+              </button>
             </div>
-            <button
-              onClick={() => setSoundEnabled(!soundEnabled)}
-              className="p-1 text-slate-500 hover:text-slate-800 rounded transition-colors"
-              title={soundEnabled ? 'Mute Alert Sounds' : 'Enable Alert Sounds'}
-            >
-              {soundEnabled ? <Volume2 className="w-4 h-4 text-blue-600" /> : <VolumeX className="w-4 h-4" />}
-            </button>
+
+            {/* Filter Pills */}
+            <div className="flex items-center gap-1.5 pt-0.5">
+              <button
+                onClick={() => setFilterType('ALL')}
+                className={`px-2 py-0.5 rounded-md text-[11px] font-semibold transition-colors ${
+                  filterType === 'ALL'
+                    ? 'bg-slate-800 text-white shadow-2xs'
+                    : 'bg-white text-slate-600 hover:bg-slate-100 border border-slate-200'
+                }`}
+              >
+                All ({allPendingActions.length})
+              </button>
+              <button
+                onClick={() => setFilterType('ACTIONS')}
+                className={`px-2 py-0.5 rounded-md text-[11px] font-semibold transition-colors flex items-center gap-1 ${
+                  filterType === 'ACTIONS'
+                    ? 'bg-amber-600 text-white shadow-2xs'
+                    : 'bg-white text-amber-800 hover:bg-amber-50 border border-amber-200'
+                }`}
+              >
+                <AlertTriangle className="w-3 h-3" />
+                <span>Action Required ({activeActionsCount})</span>
+              </button>
+              <button
+                onClick={() => setFilterType('STATEMENTS')}
+                className={`px-2 py-0.5 rounded-md text-[11px] font-semibold transition-colors flex items-center gap-1 ${
+                  filterType === 'STATEMENTS'
+                    ? 'bg-purple-600 text-white shadow-2xs'
+                    : 'bg-white text-purple-800 hover:bg-purple-50 border border-purple-200'
+                }`}
+              >
+                <Clock className="w-3 h-3" />
+                <span>Pending Statements ({pendingStatementsCount})</span>
+              </button>
+            </div>
           </div>
 
           {/* Action Items List */}
@@ -145,15 +193,19 @@ export const NotificationDrawer: React.FC<NotificationDrawerProps> = ({
                 </p>
               </div>
             ) : (
-              allPendingActions.map(({ app, action }) => {
+              displayedItems.map(({ app, action }) => {
                 const pInfo = getPriorityBadge(action.priority);
+                const labelInfo = getActionLabelInfo(action);
+                const isStmt = labelInfo.isPendingStatement;
                 const deadline = calculateDeadlineInfo(action.dueDate || app.targetDeadline);
 
                 return (
                   <div
                     key={`${app.id}-${action.id}`}
                     className={`p-3.5 rounded-xl border transition-all ${
-                      action.priority === 'CRITICAL'
+                      isStmt
+                        ? 'bg-purple-50/20 border-purple-200/90 shadow-2xs'
+                        : action.priority === 'CRITICAL'
                         ? 'bg-white border-rose-300 ring-1 ring-rose-400/20 shadow-xs'
                         : 'bg-white border-slate-200 shadow-xs'
                     }`}
@@ -163,18 +215,30 @@ export const NotificationDrawer: React.FC<NotificationDrawerProps> = ({
                         type="checkbox"
                         checked={action.isCompleted}
                         onChange={() => handleActionCheck(app.id, action.id)}
-                        className="mt-1 h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500 cursor-pointer"
+                        className={`mt-1 h-4 w-4 rounded cursor-pointer ${
+                          isStmt
+                            ? 'border-purple-300 text-purple-600 focus:ring-purple-500'
+                            : 'border-slate-300 text-blue-600 focus:ring-blue-500'
+                        }`}
+                        title={isStmt ? "Mark statement as resolved (e.g. report received)" : "Mark action as completed"}
                       />
                       <div className="flex-1 min-w-0 space-y-1.5">
                         <div className="flex items-start justify-between gap-2">
-                          <h5 className="text-xs font-bold text-slate-900 leading-snug">
+                          <h5 className={`text-xs font-bold leading-snug ${isStmt ? 'text-purple-950' : 'text-slate-900'}`}>
                             {action.title}
                           </h5>
-                          <span
-                            className={`text-[10px] font-bold px-1.5 py-0.2 rounded border shrink-0 ${pInfo.bg} ${pInfo.text} ${pInfo.border}`}
-                          >
-                            {action.priority}
-                          </span>
+                          <div className="flex items-center gap-1 shrink-0">
+                            <span
+                              className={`text-[9px] font-bold px-1.5 py-0.2 rounded border ${labelInfo.tagClass}`}
+                            >
+                              {labelInfo.shortLabel}
+                            </span>
+                            <span
+                              className={`text-[9px] font-bold px-1 rounded border ${pInfo.bg} ${pInfo.text} ${pInfo.border}`}
+                            >
+                              {action.priority}
+                            </span>
+                          </div>
                         </div>
 
                         <p className="text-xs text-slate-600 line-clamp-2 leading-relaxed">

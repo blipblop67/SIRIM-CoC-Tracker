@@ -9,6 +9,8 @@ import {
   Radio,
   FileCode,
   ShieldCheck,
+  Clock,
+  AlertTriangle,
 } from 'lucide-react';
 import confetti from 'canvas-confetti';
 import {
@@ -20,6 +22,7 @@ import {
   ParsedEmailResult,
 } from '../types';
 import { notificationAudio } from '../utils/audio';
+import { separateActionItems, getActionLabelInfo } from '../utils/actionItemUtils';
 
 interface NewApplicationModalProps {
   isOpen: boolean;
@@ -161,6 +164,7 @@ export const NewApplicationModal: React.FC<NewApplicationModalProps> = ({
       id: `act-${Date.now()}-${idx}`,
       title: a.title,
       description: a.description,
+      itemCategory: a.itemCategory || (a.assignedTo === 'APPLICANT' ? 'ACTION_REQUIRED' : 'PENDING_STATEMENT'),
       assignedTo: a.assignedTo || 'APPLICANT',
       dueDate: a.dueDate || undefined,
       isCompleted: false,
@@ -451,21 +455,46 @@ export const NewApplicationModal: React.FC<NewApplicationModalProps> = ({
                     )}
                   </div>
 
-                  {parsedPreview.actionItems.length > 0 && (
-                    <div className="bg-slate-50 p-2.5 rounded-lg border border-slate-200 text-xs space-y-1">
-                      <span className="font-bold text-slate-700">
-                        Action Items Detected ({parsedPreview.actionItems.length}):
-                      </span>
-                      {parsedPreview.actionItems.map((act, idx) => (
-                        <div key={idx} className="flex items-start gap-1.5 text-slate-700">
-                          <span className="text-amber-500 font-bold">•</span>
-                          <span>
-                            <strong>[{act.priority}]</strong> {act.title}
-                          </span>
-                        </div>
-                      ))}
-                    </div>
-                  )}
+                  {parsedPreview.actionItems.length > 0 && (() => {
+                    const { activeActions, pendingStatements } = separateActionItems(parsedPreview.actionItems);
+                    return (
+                      <div className="space-y-2">
+                        {activeActions.length > 0 && (
+                          <div className="bg-amber-50/80 p-2.5 rounded-lg border border-amber-200 text-xs space-y-1">
+                            <div className="flex items-center gap-1.5 font-bold text-amber-900">
+                              <AlertTriangle className="w-3.5 h-3.5 text-amber-600" />
+                              <span>Active Actions Required ({activeActions.length})</span>
+                            </div>
+                            {activeActions.map((act, idx) => (
+                              <div key={idx} className="flex items-start gap-1.5 text-amber-950 pl-1">
+                                <span className="text-amber-500 font-bold">•</span>
+                                <span>
+                                  <strong>[{act.priority}]</strong> {act.title}
+                                </span>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+
+                        {pendingStatements.length > 0 && (
+                          <div className="bg-purple-50/80 p-2.5 rounded-lg border border-purple-200 text-xs space-y-1">
+                            <div className="flex items-center gap-1.5 font-bold text-purple-900">
+                              <Clock className="w-3.5 h-3.5 text-purple-600" />
+                              <span>Pending Statements - Waiting on Other Party ({pendingStatements.length})</span>
+                            </div>
+                            {pendingStatements.map((act, idx) => (
+                              <div key={idx} className="flex items-start gap-1.5 text-purple-950 pl-1">
+                                <span className="text-purple-400 font-bold">•</span>
+                                <span>
+                                  <strong className="text-purple-700">[{act.assignedTo || 'Counterparty'}]:</strong> {act.title}
+                                </span>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })()}
 
                   <div className="flex justify-end pt-1">
                     <button

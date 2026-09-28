@@ -4,6 +4,15 @@ import fs from "fs";
 import { GoogleGenAI, Type } from "@google/genai";
 import { google } from "googleapis";
 import dotenv from "dotenv";
+import {
+  isOutOfOfficeSubject,
+  isOutOfOfficeText,
+  isOutOfOfficeMessage,
+  isOutOfOfficeApplication,
+  isUnrelatedEmail,
+  isSirimRegulatoryThread,
+  GMAIL_OOO_EXCLUSION_QUERY,
+} from "./src/utils/outOfOffice";
 
 dotenv.config();
 
@@ -156,20 +165,65 @@ function extractAttachments(payload: any): { hasAttachments: boolean; attachment
 
 // Heuristic fallback parser for SIRIM emails when model experiences temporary high demand
 function fallbackHeuristicSirimParser(emailSubject: string, emailBody: string, sender: string, date: string) {
-  const fullText = `${emailSubject || ""}\n${emailBody || ""}`;
-  
-  // Extract Application Ref
-  const refMatch = fullText.match(/(SQAS\/[A-Z0-9\/_-]+|e-?ComM\/[A-Z0-9\/_-]+|CIDB\/[A-Z0-9\/_-]+|COA\/[A-Z0-9\/_-]+|SIRIM\/[A-Z0-9\/_-]+|[A-Z]{3,4}\/[A-Z0-9\/_-]{4,})/i);
+  if (isOutOfOfficeSubject(emailSubject) || isOutOfOfficeText(emailBody)) {
+    return {
+      isSirimRelated: false,
+      isOutOfOffice: true,
+      confidence: 0.99,
+      applicationRef: "",
+      productName: "Out of Office Notification",
+      modelNumber: "",
+      brand: "",
+      applicant: "",
+      scheme: "Type Approval (MCMC/SIRIM)",
+      status: "UNDER_REVIEW",
+      statusExplanation: "Out-of-office / automated reply notification excluded.",
+      actionItems: [],
+      timelineEvents: [],
+      emailThreads: [],
+    };
+  }
+
+  const rawChunks = (emailBody || "")
+    .split(/(?==== MESSAGE \d+|\[Message \d+|\[[^\]]+ \([^\)]+\)\]:|\n---\n)/gi)
+    .map((c) => c.trim())
+    .filter((c) => c.length > 0);
+
+  // Message 1 is the MAIN THREAD / original application message
+  const firstChunk = rawChunks.length > 0 ? rawChunks[0] : emailBody;
+  // Message N is the LATEST UPDATE in the thread
+  const latestChunk = rawChunks.length > 0 ? rawChunks[rawChunks.length - 1] : emailBody;
+
+  // Extract clean main thread subject (stripping "Re:", "Fwd:", etc.)
+  const firstSubjectMatch = firstChunk.match(/SUBJECT:\s*([^\r\n]+)/i);
+  const mainSubject = firstSubjectMatch ? firstSubjectMatch[1].trim() : emailSubject;
+  const cleanSubject = (mainSubject || emailSubject || "")
+    .replace(/^(?:re|fwd|urgent|update|fw):\s*/gi, "")
+    .replace(/^(?:re|fwd|urgent|update|fw):\s*/gi, "")
+    .trim();
+
+  const fullText = `${cleanSubject}\n${emailSubject || ""}\n${emailBody || ""}`;
+
+  // Extract Application Ref - check firstChunk (Main Thread) first, then fullText
+  const refMatch =
+    firstChunk.match(/(SQAS\/[A-Z0-9\/_-]+|e-?ComM\/[A-Z0-9\/_-]+|CIDB\/[A-Z0-9\/_-]+|COA\/[A-Z0-9\/_-]+|SIRIM\/[A-Z0-9\/_-]+|[A-Z]{3,4}\/[A-Z0-9\/_-]{4,})/i) ||
+    fullText.match(/(SQAS\/[A-Z0-9\/_-]+|e-?ComM\/[A-Z0-9\/_-]+|CIDB\/[A-Z0-9\/_-]+|COA\/[A-Z0-9\/_-]+|SIRIM\/[A-Z0-9\/_-]+|[A-Z]{3,4}\/[A-Z0-9\/_-]{4,})/i);
   const applicationRef = refMatch ? refMatch[0].trim() : `SQAS/GEN/${Date.now().toString().slice(-4)}`;
 
-  // Extract Model Number
-  const modelMatch = fullText.match(/(?:Model(?:\s*No\.?|\s*Number)?|M\/N)[:\s]+([A-Za-z0-9-_/]+)/i) ||
-                     fullText.match(/\((CYT-[A-Za-z0-9-_]+|[A-Z0-9]{3,}-[A-Z0-9-_]+)\)/i);
+  // Extract Model Number - check firstChunk (Main Thread) first, then fullText
+  const modelMatch =
+    firstChunk.match(/(?:Model(?:\s*No\.?|\s*Number)?|M\/N)[:\s]+([A-Za-z0-9-_/]+)/i) ||
+    firstChunk.match(/\((CYT-[A-Za-z0-9-_]+|[A-Z0-9]{3,}-[A-Z0-9-_]+)\)/i) ||
+    fullText.match(/(?:Model(?:\s*No\.?|\s*Number)?|M\/N)[:\s]+([A-Za-z0-9-_/]+)/i) ||
+    fullText.match(/\((CYT-[A-Za-z0-9-_]+|[A-Z0-9]{3,}-[A-Z0-9-_]+)\)/i);
   const modelNumber = modelMatch ? modelMatch[1].trim() : "CYT-GEN-01";
 
-  // Product Name
-  const cleanSubject = (emailSubject || "").replace(/^(re|fwd|urgent|update|fw):\s*/i, "").trim();
-  const productName = cleanSubject.length > 5 ? cleanSubject : `SIRIM Product (${modelNumber})`;
+  // Product Name - check firstChunk explicit fields or clean main thread subject
+  const explicitProductMatch = firstChunk.match(/(?:Product(?:\s*Name)?|Equipment(?:\s*Name)?|Device(?:\s*Name)?)[:\s]+([^\r\n,;]{3,60})/i);
+  let productName = explicitProductMatch ? explicitProductMatch[1].trim() : "";
+  if (!productName || productName.length < 3) {
+    productName = cleanSubject.length > 5 ? cleanSubject : `SIRIM Product (${modelNumber})`;
+  }
 
   // Officer name
   const officerMatch = fullText.match(/(?:Officer|Regards|From|Auditor|Evaluator)[:,\s]+([A-Za-z\s]+(?:Ahmad|Zulkifli|Subramaniam|Othman|Ibrahim|Nurul|Farhan|Kavitha|Zainab|Faiz|Mohd|Bin|Binti)[A-Za-z\s]*)/i);
@@ -198,11 +252,6 @@ function fallbackHeuristicSirimParser(emailSubject: string, emailBody: string, s
   // ----------------------------------------------------
   // Precise Status Detection & Multi-Party Analysis (SIRIM + APPLICANT + SUPPLIER)
   // ----------------------------------------------------
-  const rawChunks = emailBody.split(/(?==== MESSAGE \d+|\[Message \d+|\[[^\]]+ \([^\)]+\)\]:|\n---\n)/gi)
-    .map(c => c.trim())
-    .filter(c => c.length > 0);
-
-  const latestChunk = rawChunks.length > 0 ? rawChunks[rawChunks.length - 1] : emailBody;
   const latestLower = latestChunk.toLowerCase();
   const fullLower = fullText.toLowerCase();
 
@@ -351,11 +400,12 @@ function fallbackHeuristicSirimParser(emailSubject: string, emailBody: string, s
   else if (fullLower.includes("cidb")) scheme = "CIDB Certification";
   else if (fullLower.includes("safety") || fullLower.includes("emc") || fullLower.includes("ms standards")) scheme = "Safety & EMC (MS Standards)";
 
-  // Action items
+  // Action items & Pending statements
   const actionItems: any[] = [];
   if (status === "RFI_ACTION_REQUIRED") {
     if (supplierStatus === "DOCUMENTS_RECEIVED_FROM_SUPPLIER") {
       actionItems.push({
+        itemCategory: "ACTION_REQUIRED",
         title: `Review and submit ${supplierName ? `${supplierName} ` : ""}supplier documents to SIRIM officer`,
         description: `Supplier has provided the requested CoC technical documents in the thread. Verify file formats (RF/EMC reports, schematics, DoC) and upload to e-ComM / email to SIRIM officer.`,
         assignedTo: "APPLICANT",
@@ -366,16 +416,18 @@ function fallbackHeuristicSirimParser(emailSubject: string, emailBody: string, s
       });
     } else if (supplierStatus === "WAITING_FOR_SUPPLIER_DOCS") {
       actionItems.push({
-        title: `Follow up with supplier${supplierName ? ` (${supplierName})` : ""} for missing CoC technical documents`,
-        description: "SIRIM officer requested technical reports/schematics. Follow up with supplier to secure the required documentation.",
+        itemCategory: "PENDING_STATEMENT",
+        title: `Waiting for lab report & technical documents from supplier${supplierName ? ` (${supplierName})` : ""}`,
+        description: "Pending statement: SIRIM officer requested technical reports/schematics. Cytron is currently waiting for the supplier to furnish the required lab report/documentation.",
         assignedTo: "SUPPLIER",
         dueDate: new Date(Date.now() + 5 * 86400000).toISOString().split("T")[0],
-        priority: "HIGH",
-        requiredActionType: "SUBMIT_DOC",
+        priority: "MEDIUM",
+        requiredActionType: "WAITING_SUPPLIER",
         emailSourceSnippet: cleanSubject,
       });
     } else {
       actionItems.push({
+        itemCategory: "ACTION_REQUIRED",
         title: "Submit required technical documentation / clarification to SIRIM",
         description: "Review SIRIM queries and reply with updated schematics, user manual, test reports, or declarations.",
         assignedTo: "APPLICANT",
@@ -387,6 +439,7 @@ function fallbackHeuristicSirimParser(emailSubject: string, emailBody: string, s
     }
   } else if (status === "SAMPLE_REQUESTED") {
     actionItems.push({
+      itemCategory: "ACTION_REQUIRED",
       title: "Deliver test samples to SIRIM QAS Lab (Building 25, Shah Alam)",
       description: "Prepare hardware test units along with power adaptors, test cables, and continuous RF test mode firmware.",
       assignedTo: "APPLICANT",
@@ -397,12 +450,24 @@ function fallbackHeuristicSirimParser(emailSubject: string, emailBody: string, s
     });
   } else if (status === "PAYMENT_PENDING") {
     actionItems.push({
+      itemCategory: "ACTION_REQUIRED",
       title: "Settle outstanding SIRIM processing fee invoice via e-ComM",
       description: `Submit payment online${processingFeeRm ? ` (RM ${processingFeeRm})` : ""} and upload payment receipt.`,
       assignedTo: "APPLICANT",
       dueDate: new Date(Date.now() + 5 * 86400000).toISOString().split("T")[0],
       priority: "CRITICAL",
       requiredActionType: "PAY_FEE",
+      emailSourceSnippet: cleanSubject,
+    });
+  } else if (status === "UNDER_REVIEW") {
+    actionItems.push({
+      itemCategory: "PENDING_STATEMENT",
+      title: "Waiting for reply / review from SIRIM officer",
+      description: "Pending statement: Application documents have been submitted to SIRIM. Currently waiting for officer review and evaluation feedback.",
+      assignedTo: "SIRIM",
+      dueDate: new Date(Date.now() + 10 * 86400000).toISOString().split("T")[0],
+      priority: "LOW",
+      requiredActionType: "AWAIT_SIRIM",
       emailSourceSnippet: cleanSubject,
     });
   }
@@ -567,7 +632,15 @@ async function startServer() {
       if (fs.existsSync(APPS_FILE)) {
         const raw = fs.readFileSync(APPS_FILE, "utf8");
         const parsed = JSON.parse(raw);
-        if (Array.isArray(parsed)) return parsed;
+        if (Array.isArray(parsed)) {
+          const cleaned = parsed.filter((app) => !isOutOfOfficeApplication(app));
+          if (cleaned.length !== parsed.length) {
+            try {
+              fs.writeFileSync(APPS_FILE, JSON.stringify(cleaned, null, 2), "utf8");
+            } catch (e) {}
+          }
+          return cleaned;
+        }
       }
     } catch (err) {
       console.warn("Could not read applications-store.json:", err);
@@ -639,14 +712,32 @@ async function startServer() {
         if (Array.isArray(parsed)) {
           // Filter out users inactive for more than 5 minutes and remove any placeholder emails
           const fiveMinAgo = Date.now() - 5 * 60 * 1000;
-          return parsed.filter((p) => {
+          const filtered = parsed.filter((p) => {
             const email = (p.email || "").toLowerCase().trim();
-            if (!email || email === "team-member@cytron.io" || email.startsWith("team-member") || !email.includes("@")) {
+            const name = (p.name || "").toLowerCase().trim();
+            if (
+              !email ||
+              email === "team-member@cytron.io" ||
+              email.includes("team-member") ||
+              email.startsWith("team-") ||
+              name === "team-member" ||
+              name === "teammember" ||
+              !email.includes("@")
+            ) {
               return false;
             }
             const t = new Date(p.lastActive).getTime();
             return !isNaN(t) && t > fiveMinAgo;
           });
+
+          // If stale/placeholder items were pruned, save clean state back to disk
+          if (filtered.length !== parsed.length) {
+            try {
+              fs.writeFileSync(PRESENCE_FILE, JSON.stringify(filtered, null, 2), "utf8");
+            } catch (e) {}
+          }
+
+          return filtered;
         }
       }
     } catch (err) {
@@ -658,8 +749,16 @@ async function startServer() {
   function recordUserPresence(user: { email: string; name?: string; picture?: string; activeAction?: string }) {
     if (!user || !user.email) return getStoredPresence();
     const cleanEmail = user.email.trim().toLowerCase();
+    const cleanName = (user.name || "").trim().toLowerCase();
     // Strictly reject placeholder / non-real emails
-    if (cleanEmail === "team-member@cytron.io" || cleanEmail.startsWith("team-member") || !cleanEmail.includes("@")) {
+    if (
+      cleanEmail === "team-member@cytron.io" ||
+      cleanEmail.includes("team-member") ||
+      cleanEmail.startsWith("team-") ||
+      cleanName === "team-member" ||
+      cleanName === "teammember" ||
+      !cleanEmail.includes("@")
+    ) {
       return getStoredPresence();
     }
 
@@ -704,10 +803,13 @@ async function startServer() {
     if (!Array.isArray(baseApps)) baseApps = [];
     if (!Array.isArray(incomingApps)) return baseApps;
 
-    const merged = [...baseApps];
+    const cleanBase = baseApps.filter((a) => !isOutOfOfficeApplication(a));
+    const cleanIncoming = incomingApps.filter((a) => !isOutOfOfficeApplication(a));
+
+    const merged = [...cleanBase];
     const nowStr = new Date().toISOString();
 
-    for (const inc of incomingApps) {
+    for (const inc of cleanIncoming) {
       if (!inc) continue;
       // Match by applicationRef, or id, or threadId
       const idx = merged.findIndex((existing) => {
@@ -858,16 +960,69 @@ async function startServer() {
   // ----------------------------------------------------
   app.post("/api/gemini/parse-email-thread", async (req: Request, res: Response) => {
     try {
-      const { emailSubject, emailBody, sender, date, existingApplication } = req.body;
+      const {
+        emailSubject,
+        emailBody,
+        sender,
+        date,
+        existingApplication,
+        mainSender,
+        latestSender,
+        mainSubject,
+      } = req.body;
 
       if (!emailSubject && !emailBody) {
         return res.status(400).json({ error: "emailSubject or emailBody is required" });
+      }
+
+      // Pre-check: If this email/thread is an Out of Office or automated reply, return immediately
+      if (isOutOfOfficeSubject(emailSubject) || isOutOfOfficeText(emailBody)) {
+        return res.json({
+          success: true,
+          data: {
+            isSirimRelated: false,
+            isOutOfOffice: true,
+            statusExplanation: "Out-of-office / automated reply notification excluded.",
+            actionItems: [],
+            timelineEvents: [],
+            emailThreads: [],
+          },
+        });
+      }
+
+      // Pre-check: If this email is unrelated spam, marketing newsletter, or consumer noise
+      if (isUnrelatedEmail({ subject: mainSubject || emailSubject, from: mainSender || sender, snippet: emailBody?.slice(0, 300) })) {
+        return res.json({
+          success: true,
+          data: {
+            isSirimRelated: false,
+            statusExplanation: "Filtered: Unrelated non-regulatory communication or commercial notice.",
+            actionItems: [],
+            timelineEvents: [],
+            emailThreads: [],
+          },
+        });
       }
 
       const ai = getGeminiClient();
 
       const prompt = `You are an expert Malaysian regulatory compliance specialist in SIRIM QAS International, e-ComM (MCMC), CIDB, and Certificate of Conformity (CoC) certification procedures.
 Analyze the following email communication or full multi-stage email thread related to a SIRIM certification application. The thread may span several weeks, months, or up to 1 year of historical back-and-forth communication.
+
+CRITICAL INSTRUCTION - DISTINGUISHING MAIN APPLICATION THREAD (MESSAGE 1) FROM SUBSEQUENT REPLIES (MESSAGE 2+):
+1. THE MAIN THREAD (MESSAGE 1) is the original application root / submission notice:
+   - Always extract 'applicationRef', 'productName', 'modelNumber', 'brand', 'applicant', and 'scheme' from MESSAGE 1 (the main thread).
+   - Clean the product name by stripping "Re:", "Fwd:", and reference codes so it reflects the actual physical equipment (e.g. "Raspberry Pi 5", "ESP32-S3 Wireless Module", "Smart IoT Gateway").
+   - Do NOT name the product after a follow-up reply, acknowledgement, or internal remark in Message 2!
+2. THE LATEST MESSAGE (MESSAGE N) determines the active workflow state:
+   - Evaluate the latest communication to establish current 'status', 'statusExplanation', and pending 'actionItems'.
+
+CRITICAL OUT-OF-OFFICE & AUTOMATED REPLY EXCLUSION:
+- If this email or thread is an Out-of-Office auto-reply, auto-response, automated leave notice, vacation response, bounce/delivery failure notification, or contains no substantive regulatory information:
+  * SET 'isSirimRelated': false
+  * SET 'isOutOfOffice': true
+  * SET 'statusExplanation': "Out-of-office / automated reply notification excluded."
+  * Do NOT create action items or extract this as a valid application.
 
 CRITICAL INSTRUCTIONS FOR READING THE ENTIRE THREAD:
 1. READ EVERY SINGLE MESSAGE IN THE THREAD: Do not stop at the first or last message. Trace the chronological history from Message 1 to the final message.
@@ -891,17 +1046,35 @@ CRITICAL RULES FOR SUPPLIER PARTICIPATION & LATEST STATUS:
 
   b) IF SIRIM ISSUED AN RFI FOR DOCUMENTS AND APPLICANT IS WAITING FOR THE SUPPLIER TO PROVIDE THEM:
      * STATUS MUST BE: 'RFI_ACTION_REQUIRED'
-     * ACTION ITEM: Assigned to 'SUPPLIER' (e.g., "Obtain RF/EMC test reports and schematics from supplier").
+     * ITEM CATEGORY: 'PENDING_STATEMENT' (NOT an action required from Cytron! It is a passive pending statement).
+     * TITLE: "Waiting for lab report & CoC technical documents from supplier" (or specific missing document).
+     * 'requiredActionType': 'WAITING_SUPPLIER'
+     * 'assignedTo': 'SUPPLIER'
      * 'supplierStatus': 'WAITING_FOR_SUPPLIER_DOCS'
      * 'statusExplanation': "Waiting for hardware supplier to furnish required CoC test reports/schematics."
 
   c) IF APPLICANT HAS ALREADY FORWARDED/SUBMITTED THE SUPPLIER'S DOCUMENTS TO SIRIM OFFICER:
      * STATUS: 'UNDER_REVIEW'
+     * ITEM CATEGORY: 'PENDING_STATEMENT' (title: "Waiting for reply / review from SIRIM officer").
+     * 'requiredActionType': 'AWAIT_SIRIM'
+     * 'assignedTo': 'SIRIM'
      * 'supplierStatus': 'DOCUMENTS_SUBMITTED_TO_SIRIM'
      * 'statusExplanation': "Supplier documents have been submitted to SIRIM; awaiting officer review."
 
   d) IF NO SUPPLIER IS INVOLVED:
      * 'supplierStatus': 'NOT_INVOLVED'
+
+CRITICAL ACTION LABELING vs PENDING STATEMENT:
+You MUST differentiate clearly between an ACTIVE ACTION REQUIRED vs a PASSIVE PENDING STATEMENT:
+1. 'ACTION_REQUIRED': Use ONLY when Cytron / applicant must actively do something (e.g. submit documents, upload to e-ComM, pay fee, deliver physical hardware test samples, write an email reply to officer).
+   - Set 'itemCategory': 'ACTION_REQUIRED'
+   - Set 'assignedTo': 'APPLICANT'
+2. 'PENDING_STATEMENT': If we just need to wait for the reply, report, deliverable, or feedback from the other party (e.g. waiting for lab report from supplier, waiting for reply from SIRIM officer, waiting for test results from accredited lab):
+   - IT MUST NOT BE A PENDING ACTION! IT IS A PENDING STATEMENT!
+   - Set 'itemCategory': 'PENDING_STATEMENT'
+   - Title MUST state what we are waiting for, e.g. "Waiting for lab report from supplier", "Waiting for reply from SIRIM officer", "Waiting for RF test data from supplier lab".
+   - Set 'assignedTo': 'SUPPLIER' | 'SIRIM' | 'LAB'
+   - Set 'requiredActionType': 'WAITING_SUPPLIER' | 'AWAIT_SIRIM' | 'WAITING_LAB' | 'WAITING_REPLY'
 
 CRITICAL STATUS CLASSIFICATION RULES (BASED ON THE LATEST STATE):
 - 'RFI_ACTION_REQUIRED':
@@ -937,10 +1110,11 @@ CRITICAL STATUS CLASSIFICATION RULES (BASED ON THE LATEST STATE):
   SIRIM QAS has approved the application, issued the Certificate of Conformity (CoC) / Type Approval / e-ComM certificate, or granted certification.
 
 EMAIL DETAILS:
-From: ${sender || "Unknown"}
-Date: ${date || new Date().toISOString()}
-Subject: ${emailSubject || ""}
-Full Thread Body:
+Main Thread Subject: ${mainSubject || emailSubject || ""}
+Original / Main Sender: ${mainSender || sender || "Unknown"}
+Latest Activity Sender: ${latestSender || sender || "Unknown"}
+Latest Activity Date: ${date || new Date().toISOString()}
+Full Thread Transcript:
 ${emailBody || ""}
 
 ${
@@ -980,6 +1154,7 @@ Return ONLY a valid JSON object matching this schema.`;
             type: Type.OBJECT,
             properties: {
               isSirimRelated: { type: Type.BOOLEAN },
+              isOutOfOffice: { type: Type.BOOLEAN },
               confidence: { type: Type.NUMBER },
               applicationRef: { type: Type.STRING },
               productName: { type: Type.STRING },
@@ -1049,6 +1224,10 @@ Return ONLY a valid JSON object matching this schema.`;
                 items: {
                   type: Type.OBJECT,
                   properties: {
+                    itemCategory: {
+                      type: Type.STRING,
+                      enum: ["ACTION_REQUIRED", "PENDING_STATEMENT"],
+                    },
                     title: { type: Type.STRING },
                     description: { type: Type.STRING },
                     assignedTo: {
@@ -1068,6 +1247,9 @@ Return ONLY a valid JSON object matching this schema.`;
                         "SEND_SAMPLE",
                         "PROVIDE_CLARIFICATION",
                         "AWAIT_SIRIM",
+                        "WAITING_SUPPLIER",
+                        "WAITING_LAB",
+                        "WAITING_REPLY",
                         "RENEW_CERTIFICATE",
                       ],
                     },
@@ -1817,9 +1999,10 @@ Evaluate thoroughly and return a JSON matching the schema.`;
       const accessToken = authHeader.split(" ")[1];
       const {
         query: rawQuery = 'SIRIM OR eComM OR "Certificate of Conformity" OR "Type Approval" OR "SIRIM QAS" OR "SQAS"',
-        maxResults = 30,
+        maxResults = 50,
         daysBack: customDaysBack,
         scope = "routine", // 'first_time' | 'routine' | 'custom'
+        filterUnrelated = true,
       } = req.body;
 
       // Determine daysBack: default 365 for first_time, 30 for routine
@@ -1833,8 +2016,11 @@ Evaluate thoroughly and return a JSON matching the schema.`;
       // Calculate cutoff date ISO
       const cutoffDate = new Date(Date.now() - daysBack * 86400000).toISOString().split("T")[0];
 
-      // Build effective query with newer_than if not already specified
+      // Build effective query with newer_than if not already specified, excluding Out of Office
       let effectiveQuery = String(rawQuery).trim();
+      if (!effectiveQuery.includes("out of office")) {
+        effectiveQuery = `(${effectiveQuery}) ${GMAIL_OOO_EXCLUSION_QUERY}`;
+      }
       if (!effectiveQuery.includes("newer_than:") && !effectiveQuery.includes("after:")) {
         effectiveQuery = `(${effectiveQuery}) newer_than:${daysBack}d`;
       }
@@ -1844,17 +2030,18 @@ Evaluate thoroughly and return a JSON matching the schema.`;
 
       const gmail = google.gmail({ version: "v1", auth: oauth2Client });
 
+      const requestedLimit = Math.max(Number(maxResults) || 50, 15);
       const searchRes = await gmail.users.threads.list({
         userId: "me",
         q: effectiveQuery,
-        maxResults: Math.min(Math.max(Number(maxResults) || 20, 10), 50),
+        maxResults: Math.min(requestedLimit, 100),
       });
 
       const threads = searchRes.data.threads || [];
       const threadSummaries = [];
 
-      // Fetch preview for threads (up to 25 items for thorough review)
-      const previewLimit = Math.min(threads.length, 25);
+      // Fetch preview for threads up to requestedLimit
+      const previewLimit = Math.min(threads.length, Math.max(requestedLimit, 50));
       for (const thread of threads.slice(0, previewLimit)) {
         if (!thread.id) continue;
         try {
@@ -1862,28 +2049,77 @@ Evaluate thoroughly and return a JSON matching the schema.`;
             userId: "me",
             id: thread.id,
             format: "metadata",
-            metadataHeaders: ["Subject", "From", "To", "Date"],
+            metadataHeaders: ["Subject", "From", "To", "Date", "Auto-Submitted", "X-Autoreply", "Precedence"],
           });
 
           const messages = detailRes.data.messages || [];
-          const firstMsg = messages[0] || {};
-          const lastMsg = messages[messages.length - 1] || {};
-          const lastHeaders = lastMsg.payload?.headers || [];
-          const firstHeaders = firstMsg.payload?.headers || [];
+          if (messages.length === 0) continue;
 
-          const subject = lastHeaders.find((h) => h.name?.toLowerCase() === "subject")?.value || "(No Subject)";
-          const from = lastHeaders.find((h) => h.name?.toLowerCase() === "from")?.value || "Unknown";
-          const lastDate = lastHeaders.find((h) => h.name?.toLowerCase() === "date")?.value || "";
-          const firstDate = firstHeaders.find((h) => h.name?.toLowerCase() === "date")?.value || lastDate;
+          // Message 1 is the MAIN THREAD / original application message
+          const firstMsg = messages[0] || {};
+          // Message N is the LATEST UPDATE in the thread
+          const lastMsg = messages[messages.length - 1] || firstMsg;
+          const firstHeaders = firstMsg.payload?.headers || [];
+          const lastHeaders = lastMsg.payload?.headers || [];
+
+          const rootSubject = firstHeaders.find((h) => h.name?.toLowerCase() === "subject")?.value || "";
+          const lastSubject = lastHeaders.find((h) => h.name?.toLowerCase() === "subject")?.value || rootSubject;
+          const cleanSubject = rootSubject.replace(/^(?:re|fwd|fw):\s*/gi, "").trim() || rootSubject || lastSubject || "(No Subject)";
+
+          const rootFrom = firstHeaders.find((h) => h.name?.toLowerCase() === "from")?.value || "Unknown";
+          const lastFrom = lastHeaders.find((h) => h.name?.toLowerCase() === "from")?.value || rootFrom;
+
+          const firstDate = firstHeaders.find((h) => h.name?.toLowerCase() === "date")?.value || "";
+          const lastDate = lastHeaders.find((h) => h.name?.toLowerCase() === "date")?.value || firstDate;
+
+          const rootSnippet = firstMsg.snippet || "";
+          const lastSnippet = lastMsg.snippet || thread.snippet || rootSnippet;
+
+          // Exclude thread if subject, headers, or snippet indicate Out of Office / auto-reply
+          if (
+            isOutOfOfficeSubject(cleanSubject) ||
+            isOutOfOfficeSubject(rootSubject) ||
+            isOutOfOfficeSubject(lastSubject) ||
+            isOutOfOfficeMessage({ subject: cleanSubject, snippet: lastSnippet, headers: lastHeaders }) ||
+            (messages.length === 1 && isOutOfOfficeText(rootSnippet))
+          ) {
+            console.log(`[Gmail Search] Excluded Out-of-Office thread ${thread.id}: "${cleanSubject}"`);
+            continue;
+          }
+
+          // Evaluate SIRIM regulatory relevance & filter unrelated marketing/noise
+          const sirimCheck = isSirimRegulatoryThread({
+            subject: cleanSubject || lastSubject,
+            from: rootFrom,
+            to: firstHeaders.find((h) => h.name?.toLowerCase() === "to")?.value,
+            snippet: `${rootSnippet} ${lastSnippet}`,
+          });
+
+          if (filterUnrelated && !sirimCheck.isRelated) {
+            console.log(`[Gmail Search] Excluded unrelated non-regulatory thread ${thread.id}: "${cleanSubject}"`);
+            continue;
+          }
 
           threadSummaries.push({
             id: thread.id,
-            snippet: thread.snippet || lastMsg.snippet || "",
-            messageCount: messages.length,
-            subject,
-            from,
+            // Primary representation defaults to the MAIN THREAD (first email) so user immediately sees the root application
+            subject: cleanSubject,
+            from: rootFrom,
             date: lastDate,
-            firstDate,
+            firstDate: firstDate,
+            snippet: rootSnippet || lastSnippet,
+            messageCount: messages.length,
+            // Granular breakdown of Main Thread vs Latest Update
+            mainSubject: cleanSubject,
+            mainFrom: rootFrom,
+            mainDate: firstDate,
+            mainSnippet: rootSnippet,
+            latestSubject: lastSubject,
+            latestFrom: lastFrom,
+            latestDate: lastDate,
+            latestSnippet: lastSnippet,
+            isVerifiedSirim: sirimCheck.isRelated,
+            relevanceScore: sirimCheck.confidence,
           });
         } catch (e) {
           console.warn(`Could not get metadata for thread ${thread.id}`, e);
@@ -2438,6 +2674,31 @@ Evaluate thoroughly and return a JSON matching the schema.`;
     }
   });
 
+  app.post("/api/presence/reset", (req: Request, res: Response) => {
+    try {
+      const { email } = req.body || {};
+      let current = getStoredPresence();
+      if (email) {
+        current = current.filter((u: any) => u.email.toLowerCase() !== email.toLowerCase());
+      } else {
+        current = [];
+      }
+      fs.writeFileSync(PRESENCE_FILE, JSON.stringify(current, null, 2), "utf8");
+      res.json({ success: true, activeUsers: current });
+    } catch (err: any) {
+      res.status(500).json({ error: "Failed to reset presence", details: err?.message });
+    }
+  });
+
+  app.delete("/api/presence", (req: Request, res: Response) => {
+    try {
+      fs.writeFileSync(PRESENCE_FILE, "[]\n", "utf8");
+      res.json({ success: true, activeUsers: [] });
+    } catch (err: any) {
+      res.status(500).json({ error: "Failed to clear presence", details: err?.message });
+    }
+  });
+
   // ----------------------------------------------------
   // Team Activity / Audit Trail Endpoints
   // ----------------------------------------------------
@@ -2647,9 +2908,11 @@ Evaluate thoroughly and return a JSON matching the schema.`;
           oauth2Client.setCredentials({ access_token: accessToken });
           const gmail = google.gmail({ version: "v1", auth: oauth2Client });
 
-          // Construct query respecting first-time (365d) vs routine (30d) duration
-          const queryBase = 'from:sirim.my OR subject:sirim OR subject:ecomm OR subject:sqas OR subject:"Type Approval" OR subject:"Certificate of Conformity" OR "Certificate of Conformity"';
-          const scanQuery = options.scanQuery || `(${queryBase}) newer_than:${scanDays}d`;
+          // Construct query respecting first-time (365d) vs routine (30d) duration, strictly excluding Out of Office
+          const queryBase = `(from:sirim.my OR subject:sirim OR subject:ecomm OR subject:sqas OR subject:"Type Approval" OR subject:"Certificate of Conformity" OR "Certificate of Conformity") ${GMAIL_OOO_EXCLUSION_QUERY}`;
+          const scanQuery = options.scanQuery
+            ? (options.scanQuery.includes("out of office") ? options.scanQuery : `(${options.scanQuery}) ${GMAIL_OOO_EXCLUSION_QUERY}`)
+            : `(${queryBase}) newer_than:${scanDays}d`;
           const maxThreadSearch = isFirstScan ? 35 : 15;
 
           const searchRes = await gmail.users.threads.list({
@@ -2688,11 +2951,52 @@ Evaluate thoroughly and return a JSON matching the schema.`;
               if (!lastMsg) continue;
 
               const lastHeaders = lastMsg.payload?.headers || [];
-              const subject = lastHeaders.find((h) => h.name?.toLowerCase() === "subject")?.value || "";
-              const from = lastHeaders.find((h) => h.name?.toLowerCase() === "from")?.value || "";
-              const lastDate = lastHeaders.find((h) => h.name?.toLowerCase() === "date")?.value || "";
               const firstHeaders = firstMsg.payload?.headers || [];
+              const rootSubject = firstHeaders.find((h) => h.name?.toLowerCase() === "subject")?.value || "";
+              const lastSubject = lastHeaders.find((h) => h.name?.toLowerCase() === "subject")?.value || rootSubject;
+              const subject = rootSubject.replace(/^(?:re|fwd|fw):\s*/gi, "").trim() || rootSubject || lastSubject || "(No Subject)";
+              const from = firstHeaders.find((h) => h.name?.toLowerCase() === "from")?.value || lastHeaders.find((h) => h.name?.toLowerCase() === "from")?.value || "";
+              const lastDate = lastHeaders.find((h) => h.name?.toLowerCase() === "date")?.value || "";
               const firstDate = firstHeaders.find((h) => h.name?.toLowerCase() === "date")?.value || lastDate;
+
+              // Check if entire thread or subject indicates Out-of-Office auto-reply
+              if (
+                isOutOfOfficeSubject(subject) ||
+                isOutOfOfficeSubject(rootSubject) ||
+                isOutOfOfficeSubject(lastSubject) ||
+                isOutOfOfficeMessage({ subject, snippet: threadRes.data.snippet || lastMsg.snippet, headers: lastHeaders })
+              ) {
+                addLog("SCAN", "INFO", `[Excluded] Skipped Out-of-Office auto-reply thread: "${subject}"`);
+                continue;
+              }
+
+              // Check regulatory relevance & filter unrelated marketing/noise
+              const sirimCheck = isSirimRegulatoryThread({
+                subject,
+                from,
+                snippet: threadRes.data.snippet || lastMsg.snippet,
+              });
+              if (!sirimCheck.isRelated) {
+                addLog("SCAN", "INFO", `[Excluded] Skipped unrelated non-regulatory thread: "${subject}"`);
+                continue;
+              }
+
+              // Filter out trailing/individual Out-of-Office auto-reply messages from this thread
+              const substantiveMessages = messages.filter((m: any) => {
+                const mHeaders = m.payload?.headers || [];
+                const mSub = mHeaders.find((h: any) => h.name?.toLowerCase() === "subject")?.value || "";
+                return !isOutOfOfficeMessage({ subject: mSub, snippet: m.snippet, headers: mHeaders });
+              });
+
+              if (substantiveMessages.length === 0) {
+                addLog("SCAN", "INFO", `[Excluded] Skipped thread containing only Out-of-Office auto-replies: "${subject}"`);
+                continue;
+              }
+
+              const activeMessages = substantiveMessages;
+              const effectiveLastMsg = activeMessages[activeMessages.length - 1] || lastMsg;
+              const effectiveLastHeaders = effectiveLastMsg.payload?.headers || lastHeaders;
+              const effectiveLastDate = effectiveLastHeaders.find((h: any) => h.name?.toLowerCase() === "date")?.value || lastDate;
 
               // Determine if this thread matches an existing application
               const existingIdx = currentApplications.findIndex(
@@ -2702,13 +3006,13 @@ Evaluate thoroughly and return a JSON matching the schema.`;
 
               // If existing application already has all messages from this thread, skip heavy AI re-parsing
               const existingMsgCount = existingApp?.emailThreads?.length || 0;
-              const hasNewMessages = !existingApp || messages.length > existingMsgCount || !existingApp.lastActivityDate;
+              const hasNewMessages = !existingApp || activeMessages.length > existingMsgCount || !existingApp.lastActivityDate;
               if (existingApp && !hasNewMessages && !options.forceRefresh) {
                 continue;
               }
 
-              // Extract text across all messages in chronological sequence to understand full application progression
-              const threadTranscript = messages.map((m: any, mIdx: number) => {
+              // Extract text across substantive messages in chronological sequence
+              const threadTranscript = activeMessages.map((m: any, mIdx: number) => {
                 const mHeaders = m.payload?.headers || [];
                 const mFrom = mHeaders.find((h: any) => h.name?.toLowerCase() === "from")?.value || "Unknown";
                 const mTo = mHeaders.find((h: any) => h.name?.toLowerCase() === "to")?.value || "";
@@ -2716,9 +3020,14 @@ Evaluate thoroughly and return a JSON matching the schema.`;
                 const mSub = mHeaders.find((h: any) => h.name?.toLowerCase() === "subject")?.value || "";
                 const extracted = extractEmailBodyText(m.payload);
                 const text = extracted.trim().length > 0 ? extracted : (m.snippet || "");
-                const isLatest = mIdx === messages.length - 1;
-                const tag = isLatest ? " [LATEST MESSAGE IN THREAD - DETERMINES CURRENT STATUS]" : "";
-                return `=== MESSAGE ${mIdx + 1} OF ${messages.length}${tag} ===
+                const isFirst = mIdx === 0;
+                const isLatest = mIdx === activeMessages.length - 1;
+                const tag = isFirst
+                  ? " [ORIGINAL / MAIN APPLICATION MESSAGE - CONTAINS APPLICATION REF, PRODUCT & MODEL]"
+                  : isLatest
+                  ? " [LATEST MESSAGE IN THREAD - DETERMINES CURRENT STATUS]"
+                  : "";
+                return `=== MESSAGE ${mIdx + 1} OF ${activeMessages.length}${tag} ===
 FROM: ${mFrom}
 TO: ${mTo}
 DATE: ${mDate}
@@ -2734,8 +3043,14 @@ ${text}`;
                 const ai = getGeminiClient();
                 const prompt = `You are an expert Malaysian regulatory compliance specialist in SIRIM QAS International, e-ComM (MCMC), CIDB, and Certificate of Conformity (CoC) certification procedures.
 Analyze this multi-stage Malaysian SIRIM certification email thread (${messages.length} messages, dating from ${firstDate} to ${lastDate}):
-Subject: ${subject}
+Main Thread Subject: ${subject}
 Existing Status: ${existingApp?.status || "None"}
+
+CRITICAL INSTRUCTION - MAIN THREAD (MESSAGE 1) vs REPLIES (MESSAGE 2+):
+1. THE MAIN THREAD (MESSAGE 1) contains the core product identity:
+   - Extract 'applicationRef', 'productName', 'modelNumber', 'brand', and 'scheme' from MESSAGE 1.
+   - Clean product name so it represents the physical equipment.
+2. THE LATEST MESSAGE (MESSAGE N) determines current 'status', 'statusExplanation', and pending 'actionItems'.
 
 CRITICAL STATUS CLASSIFICATION RULES (BASED ON THE LATEST STATE):
 - 'RFI_ACTION_REQUIRED':
@@ -2794,7 +3109,13 @@ isSirimRelated (boolean), applicationRef (string), productName (string), modelNu
                 parsed = fallbackHeuristicSirimParser(subject, threadTranscript, from, lastDate);
               }
 
-              if (parsed && parsed.isSirimRelated !== false) {
+              if (
+                parsed &&
+                parsed.isSirimRelated !== false &&
+                !parsed.isOutOfOffice &&
+                !isOutOfOfficeSubject(parsed.productName) &&
+                !isOutOfOfficeSubject(subject)
+              ) {
                 newEmailsDetected++;
 
                 // Map email messages for thread storage
@@ -2874,6 +3195,7 @@ isSirimRelated (boolean), applicationRef (string), productName (string), modelNu
                           id: `act-auto-${Date.now()}-${actIdx}`,
                           title: act.title,
                           description: act.description || "",
+                          itemCategory: act.itemCategory || (act.assignedTo === "APPLICANT" ? "ACTION_REQUIRED" : "PENDING_STATEMENT"),
                           assignedTo: act.assignedTo || "APPLICANT",
                           dueDate: act.dueDate || new Date(Date.now() + 7 * 86400000).toISOString().split("T")[0],
                           isCompleted: false,
@@ -2930,6 +3252,7 @@ isSirimRelated (boolean), applicationRef (string), productName (string), modelNu
                       id: `act-auto-${Date.now()}-${i}`,
                       title: act.title,
                       description: act.description || "",
+                      itemCategory: act.itemCategory || (act.assignedTo === "APPLICANT" ? "ACTION_REQUIRED" : "PENDING_STATEMENT"),
                       assignedTo: act.assignedTo || "APPLICANT",
                       dueDate: act.dueDate || new Date(Date.now() + 7 * 86400000).toISOString().split("T")[0],
                       isCompleted: false,

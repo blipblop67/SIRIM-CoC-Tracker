@@ -249,43 +249,61 @@ export const Header: React.FC<HeaderProps> = ({
         <div className="h-6 w-px bg-slate-700 hidden sm:block"></div>
 
         {/* Team Presence Avatar Cluster */}
-        {activeUsers.length > 0 && (
-          <div
-            className="hidden md:flex items-center -space-x-1.5 px-1.5 py-0.5 rounded-lg bg-slate-800/70 border border-slate-700/60"
-            title={`Active team collaborators (${activeUsers.length}): ${activeUsers
-              .map((u) => u.name || u.email.split('@')[0])
-              .join(', ')}`}
-          >
-            {activeUsers.slice(0, 3).map((usr) => {
-              const displayName = usr.name || usr.email.split('@')[0];
-              const initial = displayName.charAt(0).toUpperCase();
-              return (
-                <div
-                  key={usr.email}
-                  className="relative w-6 h-6 rounded-full border-2 border-slate-900 overflow-hidden bg-indigo-600 text-white font-bold text-[10px] flex items-center justify-center shrink-0 shadow-xs"
-                  title={`${displayName} (${usr.email}) - Online`}
-                >
-                  {usr.picture ? (
-                    <img
-                      src={usr.picture}
-                      alt={displayName}
-                      className="w-full h-full object-cover"
-                      referrerPolicy="no-referrer"
-                    />
-                  ) : (
-                    initial
-                  )}
-                  <span className="absolute bottom-0 right-0 w-1.5 h-1.5 bg-emerald-400 rounded-full ring-1 ring-slate-900" />
-                </div>
-              );
-            })}
-            {activeUsers.length > 3 && (
-              <span className="w-5 h-5 rounded-full bg-slate-700 text-slate-300 text-[9px] font-bold flex items-center justify-center border border-slate-800 pl-0.5">
-                +{activeUsers.length - 3}
-              </span>
-            )}
-          </div>
-        )}
+        {(() => {
+          const validActiveUsers = (activeUsers || []).filter((u) => {
+            if (!u || !u.email) return false;
+            const em = u.email.toLowerCase().trim();
+            const nm = (u.name || '').toLowerCase().trim();
+            return (
+              em !== 'team-member@cytron.io' &&
+              !em.includes('team-member') &&
+              !em.startsWith('team-') &&
+              nm !== 'team-member' &&
+              nm !== 'teammember' &&
+              em.includes('@')
+            );
+          });
+
+          if (validActiveUsers.length === 0) return null;
+
+          return (
+            <div
+              className="hidden md:flex items-center -space-x-1.5 px-1.5 py-0.5 rounded-lg bg-slate-800/70 border border-slate-700/60"
+              title={`Active team collaborators (${validActiveUsers.length}): ${validActiveUsers
+                .map((u) => u.name || u.email.split('@')[0])
+                .join(', ')}`}
+            >
+              {validActiveUsers.slice(0, 3).map((usr) => {
+                const displayName = usr.name || usr.email.split('@')[0];
+                const initial = displayName.charAt(0).toUpperCase();
+                return (
+                  <div
+                    key={usr.email}
+                    className="relative w-6 h-6 rounded-full border-2 border-slate-900 overflow-hidden bg-indigo-600 text-white font-bold text-[10px] flex items-center justify-center shrink-0 shadow-xs"
+                    title={`${displayName} (${usr.email}) - Online`}
+                  >
+                    {usr.picture ? (
+                      <img
+                        src={usr.picture}
+                        alt={displayName}
+                        className="w-full h-full object-cover"
+                        referrerPolicy="no-referrer"
+                      />
+                    ) : (
+                      initial
+                    )}
+                    <span className="absolute bottom-0 right-0 w-1.5 h-1.5 bg-emerald-400 rounded-full ring-1 ring-slate-900" />
+                  </div>
+                );
+              })}
+              {validActiveUsers.length > 3 && (
+                <span className="w-5 h-5 rounded-full bg-slate-700 text-slate-300 text-[9px] font-bold flex items-center justify-center border border-slate-800 pl-0.5">
+                  +{validActiveUsers.length - 3}
+                </span>
+              )}
+            </div>
+          );
+        })()}
 
         {/* Team Activity Feed Button */}
         {onOpenActivityDrawer && (

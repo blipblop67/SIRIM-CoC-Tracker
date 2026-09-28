@@ -40,6 +40,7 @@ import { NewApplicationModal } from './components/NewApplicationModal';
 import { NotificationDrawer } from './components/NotificationDrawer';
 import { AutomationModal } from './components/AutomationModal';
 import { DocumentPreScreenModal } from './components/DocumentPreScreenModal';
+import { isActionRequired, isPendingStatement } from './utils/actionItemUtils';
 import { TeamActivityDrawer } from './components/TeamActivityDrawer';
 import { exportApplicationsToCsv } from './utils/exportCsv';
 import {
@@ -50,6 +51,11 @@ import {
 } from './utils/auth';
 import { notificationAudio } from './utils/audio';
 import { safeFetchJson } from './utils/api';
+import {
+  isOutOfOfficeApplication,
+  isOutOfOfficeSubject,
+  isOutOfOfficeText,
+} from './utils/outOfOffice';
 
 const APPS_STORAGE_KEY = 'sirim_coc_applications_v2';
 const LEGACY_APPS_STORAGE_KEY_V1 = 'sirim_coc_applications_v1';
@@ -116,6 +122,17 @@ function sanitizeApplications(apps: SirimApplication[]): SirimApplication[] {
       name.includes('Maker Feather') ||
       name.includes('100W GaN Desktop') ||
       name.includes('Smart Soil')
+    ) {
+      continue;
+    }
+
+    // Exclude any Out-of-Office or automated reply records
+    if (
+      isOutOfOfficeApplication(app) ||
+      isOutOfOfficeSubject(name) ||
+      isOutOfOfficeSubject(app.emailSubject || '') ||
+      isOutOfOfficeSubject(app.applicationRef || '') ||
+      isOutOfOfficeText(app.notes || '')
     ) {
       continue;
     }
@@ -284,6 +301,23 @@ export default function App() {
   const [serverSyncStatus, setServerSyncStatus] = useState<'synced' | 'syncing' | 'offline'>('synced');
   const [lastServerSyncTime, setLastServerSyncTime] = useState<string>('');
 
+  const sanitizeActiveUsers = (list: any[]): UserPresence[] => {
+    if (!Array.isArray(list)) return [];
+    return list.filter((u) => {
+      if (!u || !u.email) return false;
+      const em = u.email.toLowerCase().trim();
+      const nm = (u.name || '').toLowerCase().trim();
+      return (
+        em !== 'team-member@cytron.io' &&
+        !em.includes('team-member') &&
+        !em.startsWith('team-') &&
+        nm !== 'team-member' &&
+        nm !== 'teammember' &&
+        em.includes('@')
+      );
+    });
+  };
+
   // Send presence heartbeat to inform teammates (only for real authenticated accounts)
   const sendPresenceHeartbeat = async () => {
     // If not authenticated, do not register a fake presence; only fetch active users
@@ -293,7 +327,7 @@ export default function App() {
         if (res.ok) {
           const data = await res.json();
           if (data.success && Array.isArray(data.activeUsers)) {
-            setActiveUsers(data.activeUsers);
+            setActiveUsers(sanitizeActiveUsers(data.activeUsers));
           }
         }
       } catch {
@@ -320,7 +354,7 @@ export default function App() {
       if (res.ok) {
         const data = await res.json();
         if (data.success && Array.isArray(data.activeUsers)) {
-          setActiveUsers(data.activeUsers);
+          setActiveUsers(sanitizeActiveUsers(data.activeUsers));
         }
       }
     } catch {
@@ -1095,11 +1129,13 @@ export default function App() {
 
       // Status filter
       if (statusFilter === 'ACTION_REQUIRED') {
-        const isActionStatus = ['RFI_ACTION_REQUIRED', 'SAMPLE_REQUESTED', 'PAYMENT_PENDING'].includes(app.status);
-        const hasPendingApplicantAction = app.actionItems.some((a) => !a.isCompleted && a.assignedTo === 'APPLICANT');
+        const isActionStatus = ['SAMPLE_REQUESTED', 'PAYMENT_PENDING'].includes(app.status) ||
+          (app.status === 'RFI_ACTION_REQUIRED' && app.supplierStatus !== 'WAITING_FOR_SUPPLIER_DOCS');
+        const hasPendingApplicantAction = app.actionItems.some((a) => !a.isCompleted && isActionRequired(a));
         if (!isActionStatus && !hasPendingApplicantAction) return false;
       } else if (statusFilter === 'IN_PROGRESS') {
-        if (!['SUBMITTED', 'UNDER_REVIEW', 'SAMPLE_SUBMITTED', 'TESTING_IN_PROGRESS', 'FINAL_EVALUATION'].includes(app.status)) {
+        if (!['SUBMITTED', 'UNDER_REVIEW', 'SAMPLE_SUBMITTED', 'TESTING_IN_PROGRESS', 'FINAL_EVALUATION'].includes(app.status) &&
+            !(app.status === 'RFI_ACTION_REQUIRED' && app.supplierStatus === 'WAITING_FOR_SUPPLIER_DOCS')) {
           return false;
         }
       } else if (statusFilter === 'APPROVED') {
@@ -1135,17 +1171,17 @@ export default function App() {
     });
   }, [applications, searchQuery, statusFilter, schemeFilter, assigneeFilter, authSession?.email]);
 
-  // Counts for header badge
+  // Counts for header badge (active tasks required from applicant)
   const pendingActionsCount = useMemo(() => {
     return applications
       .flatMap((a) => a.actionItems)
-      .filter((act) => !act.isCompleted).length;
+      .filter((act) => !act.isCompleted && isActionRequired(act)).length;
   }, [applications]);
 
   const criticalActionsCount = useMemo(() => {
     return applications
       .flatMap((a) => a.actionItems)
-      .filter((act) => !act.isCompleted && act.priority === 'CRITICAL').length;
+      .filter((act) => !act.isCompleted && act.priority === 'CRITICAL' && isActionRequired(act)).length;
   }, [applications]);
 
   return (

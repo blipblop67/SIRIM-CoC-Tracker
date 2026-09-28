@@ -20,12 +20,17 @@ export type CertificationScheme =
 
 export type ActionItemPriority = 'CRITICAL' | 'HIGH' | 'MEDIUM' | 'LOW';
 
+export type ActionItemCategory = 'ACTION_REQUIRED' | 'PENDING_STATEMENT';
+
 export type ActionItemType =
   | 'SUBMIT_DOC'
   | 'PAY_FEE'
   | 'SEND_SAMPLE'
   | 'PROVIDE_CLARIFICATION'
   | 'AWAIT_SIRIM'
+  | 'WAITING_SUPPLIER'
+  | 'WAITING_LAB'
+  | 'WAITING_REPLY'
   | 'RENEW_CERTIFICATE';
 
 export type ActionAssignee = 'APPLICANT' | 'SIRIM' | 'LAB' | 'SUPPLIER';
@@ -34,6 +39,7 @@ export interface ActionItem {
   id: string;
   title: string;
   description: string;
+  itemCategory?: ActionItemCategory; // 'ACTION_REQUIRED' (active task for applicant) vs 'PENDING_STATEMENT' (passive waiting for other party's reply/lab report)
   assignedTo: ActionAssignee;
   assignedToUserEmail?: string;
   assignedToName?: string;

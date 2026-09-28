@@ -26,11 +26,13 @@ import {
   Building2,
   AlertCircle,
   Download,
+  ArrowUpDown,
 } from 'lucide-react';
 import confetti from 'canvas-confetti';
 import {
   SirimApplication,
   ActionItem,
+  ActionItemCategory,
   ActionItemPriority,
   ActionAssignee,
   ActionItemType,
@@ -50,6 +52,7 @@ import {
   getSupplierStatusBadgeInfo,
   getAssigneeBadgeInfo,
 } from '../utils/formatters';
+import { separateActionItems, getActionLabelInfo, isPendingStatement } from '../utils/actionItemUtils';
 import { notificationAudio } from '../utils/audio';
 import { getDefaultChecklistForScheme } from '../utils/documentChecklistDefaults';
 import { DocumentPreScreenModal } from './DocumentPreScreenModal';
@@ -88,6 +91,8 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({
 
   // New action item form state
   const [showAddAction, setShowAddAction] = useState(false);
+  const [newActionCategory, setNewActionCategory] = useState<ActionItemCategory>('ACTION_REQUIRED');
+  const [actionsFilter, setActionsFilter] = useState<'ALL' | 'ACTIONS' | 'STATEMENTS'>('ALL');
   const [newActionTitle, setNewActionTitle] = useState('');
   const [newActionDesc, setNewActionDesc] = useState('');
   const [newActionAssignee, setNewActionAssignee] = useState<ActionAssignee>('APPLICANT');
@@ -128,10 +133,42 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({
     link?: string;
   } | null>(null);
 
-  // Expanded email messages
-  const [expandedEmailId, setExpandedEmailId] = useState<string | null>(
-    application.emailThreads.length > 0 ? application.emailThreads[application.emailThreads.length - 1].id : null
-  );
+  // Separation of active actions vs pending statements
+  const incompleteItems = application.actionItems.filter((a) => !a.isCompleted);
+  const { activeActions, pendingStatements } = separateActionItems(application.actionItems);
+  const incActiveActions = activeActions.filter((a) => !a.isCompleted);
+  const incPendingStatements = pendingStatements.filter((a) => !a.isCompleted);
+
+  // Expanded email messages & ordering
+  const [emailThreadOrder, setEmailThreadOrder] = useState<'oldest-first' | 'newest-first'>('oldest-first');
+  const [expandedEmailIds, setExpandedEmailIds] = useState<Set<string>>(() => {
+    const initial = new Set<string>();
+    if (application.emailThreads.length > 0) {
+      // Default expand the first email (main thread) and latest email
+      initial.add(application.emailThreads[0].id);
+      if (application.emailThreads.length > 1) {
+        initial.add(application.emailThreads[application.emailThreads.length - 1].id);
+      }
+    }
+    return initial;
+  });
+
+  const toggleExpandEmail = (id: string) => {
+    setExpandedEmailIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const handleToggleExpandAllEmails = () => {
+    if (expandedEmailIds.size === application.emailThreads.length) {
+      setExpandedEmailIds(new Set());
+    } else {
+      setExpandedEmailIds(new Set(application.emailThreads.map((m) => m.id)));
+    }
+  };
 
   const statusInfo = getStatusBadgeInfo(application.status);
   const deadlineInfo = calculateDeadlineInfo(application.targetDeadline);
@@ -260,6 +297,7 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({
       id: `act-custom-${Date.now()}`,
       title: newActionTitle.trim(),
       description: newActionDesc.trim() || newActionTitle.trim(),
+      itemCategory: newActionCategory,
       assignedTo: newActionAssignee,
       assignedToUserEmail: newActionAssignedUserEmail.trim() || undefined,
       assignedToName: newActionAssignedUserEmail.trim()
@@ -621,10 +659,22 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({
             }`}
           >
             <AlertTriangle className="w-4 h-4 text-amber-500" />
-            <span>Action Items</span>
-            <span className="ml-1 px-1.5 py-0.2 rounded-full text-[10px] bg-slate-100 text-slate-700">
-              {application.actionItems.filter((a) => !a.isCompleted).length}
-            </span>
+            <span>Actions & Statements</span>
+            <div className="flex items-center gap-1 ml-1">
+              {incActiveActions.length > 0 && (
+                <span className="px-1.5 py-0.2 rounded-full text-[10px] font-bold bg-amber-100 text-amber-800" title="Active actions required from Cytron">
+                  {incActiveActions.length} act
+                </span>
+              )}
+              {incPendingStatements.length > 0 && (
+                <span className="px-1.5 py-0.2 rounded-full text-[10px] font-bold bg-purple-100 text-purple-800" title="Pending statements waiting on other party">
+                  {incPendingStatements.length} stmt
+                </span>
+              )}
+              {incompleteItems.length === 0 && (
+                <span className="px-1.5 py-0.2 rounded-full text-[10px] bg-slate-100 text-slate-700">0</span>
+              )}
+            </div>
           </button>
 
           <button
@@ -699,36 +749,138 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({
 
         {/* Content Body */}
         <div className="p-4 sm:p-6 overflow-y-auto flex-1 bg-slate-50/50">
-          {/* TAB 1: ACTION ITEMS */}
+          {/* TAB 1: ACTION ITEMS & PENDING STATEMENTS */}
           {activeTab === 'actions' && (
             <div className="space-y-4">
-              <div className="flex items-center justify-between">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                 <div>
-                  <h4 className="text-sm font-bold text-slate-900">Pending Action Items & Tasks</h4>
+                  <h4 className="text-sm font-bold text-slate-900 flex items-center gap-2">
+                    <span>Actions & Pending Statements</span>
+                    <span className="text-xs font-normal text-slate-500">
+                      ({incActiveActions.length} active action{incActiveActions.length === 1 ? '' : 's'}, {incPendingStatements.length} pending statement{incPendingStatements.length === 1 ? '' : 's'})
+                    </span>
+                  </h4>
                   <p className="text-xs text-slate-500">
-                    Extracted from SIRIM QAS queries, evaluation requirements, and invoices.
+                    Active tasks required from Cytron compliance team, plus pending statements tracking external replies and lab reports.
                   </p>
                 </div>
                 <button
                   onClick={() => setShowAddAction(!showAddAction)}
-                  className="flex items-center gap-1 px-3 py-1.5 text-xs font-semibold text-blue-700 bg-blue-50 hover:bg-blue-100 border border-blue-200 rounded-lg transition-colors"
+                  className="flex items-center gap-1 px-3 py-1.5 text-xs font-semibold text-blue-700 bg-blue-50 hover:bg-blue-100 border border-blue-200 rounded-lg transition-colors self-start sm:self-auto shrink-0"
                 >
                   <Plus className="w-3.5 h-3.5" />
-                  <span>Add Action</span>
+                  <span>{showAddAction ? 'Close Form' : 'Add Item / Statement'}</span>
                 </button>
               </div>
 
-              {/* Add Action Item Subform */}
+              {/* Add Action Item / Statement Subform */}
               {showAddAction && (
                 <form
                   onSubmit={handleAddAction}
-                  className="bg-white border border-blue-200 rounded-xl p-4 space-y-3 shadow-xs"
+                  className="bg-white border border-blue-200 rounded-xl p-4 space-y-3.5 shadow-xs"
                 >
-                  <h5 className="text-xs font-bold text-blue-900">New Action Item</h5>
+                  <div className="flex items-center justify-between border-b border-slate-100 pb-2">
+                    <h5 className="text-xs font-bold text-blue-900">
+                      Create Item / Track Pending Statement
+                    </h5>
+                    {/* Category Selection Tabs */}
+                    <div className="flex items-center bg-slate-100 p-0.5 rounded-lg text-[11px] font-semibold">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setNewActionCategory('ACTION_REQUIRED');
+                          setNewActionAssignee('APPLICANT');
+                          setNewActionType('SUBMIT_DOC');
+                        }}
+                        className={`flex items-center gap-1 px-2.5 py-1 rounded-md transition-all ${
+                          newActionCategory === 'ACTION_REQUIRED'
+                            ? 'bg-white text-amber-900 shadow-2xs font-bold'
+                            : 'text-slate-600 hover:text-slate-900'
+                        }`}
+                      >
+                        <AlertTriangle className="w-3 h-3 text-amber-500" />
+                        <span>Action Required</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setNewActionCategory('PENDING_STATEMENT');
+                          setNewActionAssignee('SUPPLIER');
+                          setNewActionType('WAITING_SUPPLIER');
+                        }}
+                        className={`flex items-center gap-1 px-2.5 py-1 rounded-md transition-all ${
+                          newActionCategory === 'PENDING_STATEMENT'
+                            ? 'bg-white text-purple-900 shadow-2xs font-bold'
+                            : 'text-slate-600 hover:text-slate-900'
+                        }`}
+                      >
+                        <Clock className="w-3 h-3 text-purple-600" />
+                        <span>Pending Statement (Waiting)</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Informational Guidance */}
+                  {newActionCategory === 'PENDING_STATEMENT' ? (
+                    <div className="bg-purple-50/70 border border-purple-200 rounded-lg p-2.5 text-xs text-purple-900 space-y-1">
+                      <div className="font-semibold flex items-center gap-1">
+                        <Clock className="w-3.5 h-3.5 text-purple-600" />
+                        <span>Pending Statement - Not an active action for our team</span>
+                      </div>
+                      <p className="text-[11px] text-purple-700">
+                        Use this when we are waiting for a reply, document, or test report from the other party (e.g. waiting for lab report from supplier, waiting for SIRIM officer evaluation).
+                      </p>
+                      <div className="flex items-center gap-1.5 flex-wrap pt-1">
+                        <span className="text-[10px] font-semibold text-purple-600">Quick suggestions:</span>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setNewActionTitle('Waiting for lab report from supplier');
+                            setNewActionAssignee('SUPPLIER');
+                            setNewActionType('WAITING_SUPPLIER');
+                          }}
+                          className="text-[10px] px-2 py-0.5 rounded bg-white border border-purple-200 text-purple-800 hover:bg-purple-100"
+                        >
+                          + Waiting for lab report from supplier
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setNewActionTitle('Waiting for reply / review from SIRIM officer');
+                            setNewActionAssignee('SIRIM');
+                            setNewActionType('AWAIT_SIRIM');
+                          }}
+                          className="text-[10px] px-2 py-0.5 rounded bg-white border border-purple-200 text-purple-800 hover:bg-purple-100"
+                        >
+                          + Waiting for reply from SIRIM
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setNewActionTitle('Waiting for test report from accredited lab');
+                            setNewActionAssignee('LAB');
+                            setNewActionType('WAITING_LAB');
+                          }}
+                          className="text-[10px] px-2 py-0.5 rounded bg-white border border-purple-200 text-purple-800 hover:bg-purple-100"
+                        >
+                          + Waiting for lab report
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="bg-amber-50/70 border border-amber-200 rounded-lg p-2 text-xs text-amber-900">
+                      <span className="font-semibold">Action Required:</span> Active task that Cytron compliance team must execute (submit documents, settle invoice, send sample).
+                    </div>
+                  )}
+
                   <div>
                     <input
                       type="text"
-                      placeholder="Title (e.g. Upload revised RF report appendix)"
+                      placeholder={
+                        newActionCategory === 'PENDING_STATEMENT'
+                          ? 'e.g. Waiting for lab report from supplier'
+                          : 'Title (e.g. Upload revised RF report appendix to e-ComM)'
+                      }
                       value={newActionTitle}
                       onChange={(e) => setNewActionTitle(e.target.value)}
                       required
@@ -737,7 +889,11 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({
                   </div>
                   <div>
                     <textarea
-                      placeholder="Detailed instructions or context from SIRIM..."
+                      placeholder={
+                        newActionCategory === 'PENDING_STATEMENT'
+                          ? 'Notes or statement context (e.g. Supplier notified on 25 Sept, awaiting IEC 62368-1 lab report)...'
+                          : 'Detailed instructions or context from SIRIM...'
+                      }
                       value={newActionDesc}
                       onChange={(e) => setNewActionDesc(e.target.value)}
                       rows={2}
@@ -746,16 +902,18 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({
                   </div>
                   <div className="grid grid-cols-1 sm:grid-cols-4 gap-2">
                     <div>
-                      <label className="text-[10px] font-semibold text-slate-500 uppercase">Assignee</label>
+                      <label className="text-[10px] font-semibold text-slate-500 uppercase">
+                        {newActionCategory === 'PENDING_STATEMENT' ? 'Waiting On (Party)' : 'Assignee'}
+                      </label>
                       <select
                         value={newActionAssignee}
                         onChange={(e) => setNewActionAssignee(e.target.value as ActionAssignee)}
                         className="w-full text-xs px-2 py-1.5 border border-slate-300 rounded-lg bg-white"
                       >
-                        <option value="APPLICANT">Cytron / Applicant</option>
                         <option value="SUPPLIER">Hardware Supplier / ODM</option>
                         <option value="SIRIM">SIRIM QAS Officer</option>
-                        <option value="LAB">Test Lab</option>
+                        <option value="LAB">External Test Lab</option>
+                        <option value="APPLICANT">Cytron / Applicant</option>
                       </select>
                     </div>
                     <div>
@@ -772,21 +930,35 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({
                       </select>
                     </div>
                     <div>
-                      <label className="text-[10px] font-semibold text-slate-500 uppercase">Action Type</label>
+                      <label className="text-[10px] font-semibold text-slate-500 uppercase">Type</label>
                       <select
                         value={newActionType}
                         onChange={(e) => setNewActionType(e.target.value as ActionItemType)}
                         className="w-full text-xs px-2 py-1.5 border border-slate-300 rounded-lg bg-white"
                       >
-                        <option value="SUBMIT_DOC">Submit Document</option>
-                        <option value="PAY_FEE">Pay Fee</option>
-                        <option value="SEND_SAMPLE">Send Sample</option>
-                        <option value="PROVIDE_CLARIFICATION">Provide Clarification</option>
-                        <option value="AWAIT_SIRIM">Await SIRIM</option>
+                        {newActionCategory === 'PENDING_STATEMENT' ? (
+                          <>
+                            <option value="WAITING_SUPPLIER">Waiting for Supplier Docs/Lab Report</option>
+                            <option value="AWAIT_SIRIM">Waiting for SIRIM Review</option>
+                            <option value="WAITING_LAB">Waiting for External Lab Test</option>
+                            <option value="WAITING_REPLY">Waiting for General Reply</option>
+                          </>
+                        ) : (
+                          <>
+                            <option value="SUBMIT_DOC">Submit Document</option>
+                            <option value="PAY_FEE">Pay Fee</option>
+                            <option value="SEND_SAMPLE">Send Sample</option>
+                            <option value="PROVIDE_CLARIFICATION">Provide Clarification</option>
+                            <option value="AWAIT_SIRIM">Await SIRIM</option>
+                            <option value="RENEW_CERTIFICATE">Renew Certificate</option>
+                          </>
+                        )}
                       </select>
                     </div>
                     <div>
-                      <label className="text-[10px] font-semibold text-slate-500 uppercase">Due Date</label>
+                      <label className="text-[10px] font-semibold text-slate-500 uppercase">
+                        {newActionCategory === 'PENDING_STATEMENT' ? 'Expected Date' : 'Due Date'}
+                      </label>
                       <input
                         type="date"
                         value={newActionDueDate}
@@ -798,7 +970,7 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({
                   <div>
                     <div className="flex items-center justify-between">
                       <label className="text-[10px] font-semibold text-slate-500 uppercase">
-                        Assign To Team Member (Email)
+                        Assign Follow-up to Team Member (Email)
                       </label>
                       {currentUserEmail && (
                         <button
@@ -828,96 +1000,161 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({
                     </button>
                     <button
                       type="submit"
-                      className="px-3 py-1 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-500 rounded-lg shadow-xs"
+                      className="px-3 py-1.5 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-500 rounded-lg shadow-xs flex items-center gap-1.5"
                     >
-                      Save Item
+                      <Plus className="w-3.5 h-3.5" />
+                      <span>{newActionCategory === 'PENDING_STATEMENT' ? 'Save Statement' : 'Save Action'}</span>
                     </button>
                   </div>
                 </form>
               )}
 
-              {/* Action items list */}
+              {/* Sub-Filter Pills */}
+              <div className="flex items-center justify-between gap-2 flex-wrap pt-1">
+                <div className="flex items-center gap-1.5">
+                  <button
+                    onClick={() => setActionsFilter('ALL')}
+                    className={`px-2.5 py-1 rounded-lg text-xs font-semibold transition-colors ${
+                      actionsFilter === 'ALL'
+                        ? 'bg-slate-900 text-white shadow-2xs'
+                        : 'bg-white text-slate-600 hover:bg-slate-100 border border-slate-200'
+                    }`}
+                  >
+                    All ({application.actionItems.length})
+                  </button>
+                  <button
+                    onClick={() => setActionsFilter('ACTIONS')}
+                    className={`px-2.5 py-1 rounded-lg text-xs font-semibold transition-colors flex items-center gap-1 ${
+                      actionsFilter === 'ACTIONS'
+                        ? 'bg-amber-600 text-white shadow-2xs'
+                        : 'bg-white text-amber-800 hover:bg-amber-50 border border-amber-200'
+                    }`}
+                  >
+                    <AlertTriangle className="w-3 h-3" />
+                    <span>Active Actions ({activeActions.length})</span>
+                  </button>
+                  <button
+                    onClick={() => setActionsFilter('STATEMENTS')}
+                    className={`px-2.5 py-1 rounded-lg text-xs font-semibold transition-colors flex items-center gap-1 ${
+                      actionsFilter === 'STATEMENTS'
+                        ? 'bg-purple-600 text-white shadow-2xs'
+                        : 'bg-white text-purple-800 hover:bg-purple-50 border border-purple-200'
+                    }`}
+                  >
+                    <Clock className="w-3 h-3" />
+                    <span>Pending Statements ({pendingStatements.length})</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* Action items & statements list */}
               <div className="space-y-2.5">
-                {application.actionItems.map((action) => {
-                  const pBadge = getPriorityBadge(action.priority);
-                  return (
-                    <div
-                      key={action.id}
-                      className={`p-3.5 rounded-xl border transition-all ${
-                        action.isCompleted
-                          ? 'bg-slate-100/80 border-slate-200 opacity-75'
-                          : action.priority === 'CRITICAL'
-                          ? 'bg-white border-rose-300 ring-1 ring-rose-400/20'
-                          : 'bg-white border-slate-200 shadow-xs'
-                      }`}
-                    >
-                      <div className="flex items-start gap-3">
-                        <input
-                          type="checkbox"
-                          checked={action.isCompleted}
-                          onChange={() => handleToggleAction(action.id)}
-                          className="mt-1 h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500 cursor-pointer"
-                        />
-                        <div className="flex-1 space-y-1">
-                          <div className="flex flex-wrap items-center justify-between gap-2">
-                            <h5
-                              className={`text-xs sm:text-sm font-bold ${
-                                action.isCompleted
-                                  ? 'line-through text-slate-500'
-                                  : 'text-slate-900'
-                              }`}
-                            >
-                              {action.title}
-                            </h5>
-                            <div className="flex items-center gap-1.5 flex-wrap">
-                              <span
-                                className={`text-[10px] font-bold px-1.5 py-0.5 rounded border ${pBadge.bg} ${pBadge.text} ${pBadge.border}`}
+                {application.actionItems
+                  .filter((action) => {
+                    if (actionsFilter === 'ACTIONS') return !isPendingStatement(action);
+                    if (actionsFilter === 'STATEMENTS') return isPendingStatement(action);
+                    return true;
+                  })
+                  .map((action) => {
+                    const pBadge = getPriorityBadge(action.priority);
+                    const labelInfo = getActionLabelInfo(action);
+                    const isStmt = labelInfo.isPendingStatement;
+
+                    return (
+                      <div
+                        key={action.id}
+                        className={`p-3.5 rounded-xl border transition-all ${
+                          action.isCompleted
+                            ? 'bg-slate-100/80 border-slate-200 opacity-75'
+                            : isStmt
+                            ? 'bg-purple-50/20 border-purple-200 shadow-xs'
+                            : action.priority === 'CRITICAL'
+                            ? 'bg-white border-rose-300 ring-1 ring-rose-400/20 shadow-xs'
+                            : 'bg-white border-slate-200 shadow-xs'
+                        }`}
+                      >
+                        <div className="flex items-start gap-3">
+                          <input
+                            type="checkbox"
+                            checked={action.isCompleted}
+                            onChange={() => handleToggleAction(action.id)}
+                            className={`mt-1 h-4 w-4 rounded cursor-pointer ${
+                              isStmt
+                                ? 'border-purple-300 text-purple-600 focus:ring-purple-500'
+                                : 'border-slate-300 text-blue-600 focus:ring-blue-500'
+                            }`}
+                            title={isStmt ? "Mark statement as resolved/received" : "Mark action as completed"}
+                          />
+                          <div className="flex-1 space-y-1">
+                            <div className="flex flex-wrap items-center justify-between gap-2">
+                              <h5
+                                className={`text-xs sm:text-sm font-bold ${
+                                  action.isCompleted
+                                    ? 'line-through text-slate-500'
+                                    : isStmt
+                                    ? 'text-purple-950'
+                                    : 'text-slate-900'
+                                }`}
                               >
-                                {action.priority}
-                              </span>
-                              {(() => {
-                                const aInfo = getAssigneeBadgeInfo(action.assignedTo);
-                                return (
-                                  <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded border ${aInfo.bg} ${aInfo.text} ${aInfo.border}`}>
-                                    {aInfo.label}
-                                  </span>
-                                );
-                              })()}
-                              {action.assignedToUserEmail && (
+                                {action.title}
+                              </h5>
+                              <div className="flex items-center gap-1.5 flex-wrap">
+                                {/* Explicit Distinct Badge */}
                                 <span
-                                  className="text-[10px] font-semibold px-1.5 py-0.5 rounded border bg-indigo-50 text-indigo-700 border-indigo-200"
-                                  title={`Assigned to ${action.assignedToUserEmail}`}
+                                  className={`text-[10px] font-bold px-2 py-0.5 rounded border ${labelInfo.tagClass}`}
                                 >
-                                  👤 {action.assignedToName || action.assignedToUserEmail.split('@')[0]}
+                                  {labelInfo.categoryBadge}
                                 </span>
-                              )}
-                            </div>
-                          </div>
 
-                          <p className="text-xs text-slate-600 leading-relaxed">
-                            {action.description}
-                          </p>
-
-                          {action.emailSourceSnippet && (
-                            <div className="bg-slate-50 border-l-2 border-amber-400 p-2 text-[11px] text-slate-600 rounded-r mt-1 italic">
-                              "{action.emailSourceSnippet}"
-                            </div>
-                          )}
-
-                          <div className="flex items-center justify-between text-[11px] text-slate-500 pt-1">
-                            <div className="flex items-center gap-2 flex-wrap">
-                              {action.dueDate && (
-                                <span className="flex items-center gap-1 font-medium text-slate-700">
-                                  <Calendar className="w-3 h-3 text-slate-400" />
-                                  Target SLA: {formatDate(action.dueDate)}
+                                <span
+                                  className={`text-[10px] font-bold px-1.5 py-0.5 rounded border ${pBadge.bg} ${pBadge.text} ${pBadge.border}`}
+                                >
+                                  {action.priority}
                                 </span>
-                              )}
-                              {action.completedAt && (
-                                <span className="text-emerald-700 font-medium">
-                                  ✓ Completed {action.completedBy ? `by ${action.completedBy.split('@')[0]}` : ''} on {formatDate(action.completedAt)}
-                                </span>
-                              )}
+                                {(() => {
+                                  const aInfo = getAssigneeBadgeInfo(action.assignedTo, isStmt);
+                                  return (
+                                    <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded border ${aInfo.bg} ${aInfo.text} ${aInfo.border}`}>
+                                      {aInfo.label}
+                                    </span>
+                                  );
+                                })()}
+                                {action.assignedToUserEmail && (
+                                  <span
+                                    className="text-[10px] font-semibold px-1.5 py-0.5 rounded border bg-indigo-50 text-indigo-700 border-indigo-200"
+                                    title={`Assigned to ${action.assignedToUserEmail}`}
+                                  >
+                                    👤 {action.assignedToName || action.assignedToUserEmail.split('@')[0]}
+                                  </span>
+                                )}
+                              </div>
                             </div>
+
+                            <p className="text-xs text-slate-600 leading-relaxed">
+                              {action.description}
+                            </p>
+
+                            {action.emailSourceSnippet && (
+                              <div className="bg-slate-50 border-l-2 border-amber-400 p-2 text-[11px] text-slate-600 rounded-r mt-1 italic">
+                                "{action.emailSourceSnippet}"
+                              </div>
+                            )}
+
+                            <div className="flex items-center justify-between text-[11px] text-slate-500 pt-1">
+                              <div className="flex items-center gap-2 flex-wrap">
+                                {action.dueDate && (
+                                  <span className="flex items-center gap-1 font-medium text-slate-700">
+                                    <Calendar className="w-3 h-3 text-slate-400" />
+                                    {isStmt ? 'Expected by: ' : 'Target SLA: '}
+                                    {formatDate(action.dueDate)}
+                                  </span>
+                                )}
+                                {action.completedAt && (
+                                  <span className="text-emerald-700 font-medium">
+                                    ✓ {isStmt ? 'Resolved' : 'Completed'} {action.completedBy ? `by ${action.completedBy.split('@')[0]}` : ''} on {formatDate(action.completedAt)}
+                                  </span>
+                                )}
+                              </div>
 
                             {!action.isCompleted && (
                               <button
@@ -1145,71 +1382,130 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({
                 </a>
               </div>
 
-              <div>
-                <h4 className="text-sm font-bold text-slate-900">Email Correspondence Threads</h4>
-                <p className="text-xs text-slate-500">
-                  Full incoming and outgoing communications linked to Ref {application.applicationRef}.
-                </p>
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-200 pb-3">
+                <div>
+                  <h4 className="text-sm font-bold text-slate-900 flex items-center gap-2">
+                    <span>Email Correspondence Threads</span>
+                    <span className="px-2 py-0.5 rounded-full text-xs font-semibold bg-sky-100 text-sky-800">
+                      {application.emailThreads.length} {application.emailThreads.length === 1 ? 'Message' : 'Messages'}
+                    </span>
+                  </h4>
+                  <p className="text-xs text-slate-500">
+                    Full chronological communications linked to Ref {application.applicationRef}.
+                  </p>
+                </div>
+
+                <div className="flex items-center gap-2 shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => setEmailThreadOrder(emailThreadOrder === 'oldest-first' ? 'newest-first' : 'oldest-first')}
+                    className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg border border-slate-200 transition-colors"
+                    title="Toggle email sequence"
+                  >
+                    <ArrowUpDown className="w-3.5 h-3.5 text-slate-500" />
+                    <span>{emailThreadOrder === 'oldest-first' ? 'Order: Oldest First (1 → 2)' : 'Order: Newest First (2 → 1)'}</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={handleToggleExpandAllEmails}
+                    className="px-2.5 py-1 text-xs font-semibold text-sky-700 hover:text-sky-800 bg-sky-50 hover:bg-sky-100 rounded-lg border border-sky-200 transition-colors"
+                  >
+                    {expandedEmailIds.size === application.emailThreads.length ? 'Collapse All' : 'Expand All'}
+                  </button>
+                </div>
               </div>
 
               <div className="space-y-3">
-                {application.emailThreads.map((email) => {
-                  const isExpanded = expandedEmailId === email.id;
-                  return (
-                    <div
-                      key={email.id}
-                      className="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-xs"
-                    >
-                      <div
-                        onClick={() => setExpandedEmailId(isExpanded ? null : email.id)}
-                        className="p-4 cursor-pointer hover:bg-slate-50/80 transition-colors flex items-start justify-between gap-3"
-                      >
-                        <div className="space-y-1 min-w-0">
-                          <div className="flex items-center gap-2 flex-wrap">
-                            <span className="text-xs font-bold text-slate-900 truncate">
-                              {email.from}
-                            </span>
-                            {email.senderRole && email.senderRole !== 'UNKNOWN' && (
-                              <span
-                                className={`text-[10px] font-semibold px-1.5 py-0.2 rounded border ${
-                                  email.senderRole === 'SUPPLIER'
-                                    ? 'bg-purple-100 text-purple-800 border-purple-200'
-                                    : email.senderRole === 'SIRIM_OFFICER'
-                                    ? 'bg-blue-100 text-blue-800 border-blue-200'
-                                    : email.senderRole === 'APPLICANT'
-                                    ? 'bg-indigo-100 text-indigo-800 border-indigo-200'
-                                    : 'bg-amber-100 text-amber-800 border-amber-200'
-                                }`}
-                              >
-                                {email.senderRole === 'SUPPLIER'
-                                  ? 'Supplier / ODM'
-                                  : email.senderRole === 'SIRIM_OFFICER'
-                                  ? 'SIRIM QAS'
-                                  : email.senderRole === 'APPLICANT'
-                                  ? 'Applicant'
-                                  : 'Test Lab'}
-                              </span>
-                            )}
-                            <span className="text-[10px] text-slate-400">→</span>
-                            <span className="text-xs text-slate-600 truncate">{email.to}</span>
-                          </div>
-                          <h5 className="text-xs font-semibold text-slate-800">{email.subject}</h5>
-                          {!isExpanded && (
-                            <p className="text-xs text-slate-500 line-clamp-1">{email.snippet}</p>
-                          )}
-                        </div>
+                {[...application.emailThreads]
+                  .sort((a, b) => {
+                    const timeA = new Date(a.date).getTime() || 0;
+                    const timeB = new Date(b.date).getTime() || 0;
+                    return emailThreadOrder === 'oldest-first' ? timeA - timeB : timeB - timeA;
+                  })
+                  .map((email, displayIdx) => {
+                    const isExpanded = expandedEmailIds.has(email.id);
+                    const isMainThreadOrigin =
+                      email.id === application.emailThreads[0]?.id || (email as any).isMainThread;
+                    const isLatestActivity =
+                      email.id === application.emailThreads[application.emailThreads.length - 1]?.id &&
+                      application.emailThreads.length > 1;
 
-                        <div className="flex items-center gap-2 shrink-0">
-                          <span className="text-[11px] text-slate-400 font-medium">
-                            {formatDate(email.date)}
-                          </span>
-                          {isExpanded ? (
-                            <ChevronUp className="w-4 h-4 text-slate-400" />
-                          ) : (
-                            <ChevronDown className="w-4 h-4 text-slate-400" />
-                          )}
+                    return (
+                      <div
+                        key={email.id}
+                        className={`bg-white border rounded-xl overflow-hidden shadow-xs transition-all ${
+                          isMainThreadOrigin
+                            ? 'border-indigo-200 ring-1 ring-indigo-500/20'
+                            : isLatestActivity
+                            ? 'border-emerald-200 ring-1 ring-emerald-500/20'
+                            : 'border-slate-200'
+                        }`}
+                      >
+                        <div
+                          onClick={() => toggleExpandEmail(email.id)}
+                          className={`p-4 cursor-pointer hover:bg-slate-50/80 transition-colors flex items-start justify-between gap-3 ${
+                            isMainThreadOrigin ? 'bg-indigo-50/30' : isLatestActivity ? 'bg-emerald-50/30' : ''
+                          }`}
+                        >
+                          <div className="space-y-1.5 min-w-0">
+                            <div className="flex items-center gap-2 flex-wrap">
+                              {/* Main Thread / Latest Activity Badges */}
+                              {isMainThreadOrigin && (
+                                <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded bg-indigo-100 text-indigo-800 border border-indigo-200">
+                                  📌 Main Application Thread (#1)
+                                </span>
+                              )}
+                              {isLatestActivity && (
+                                <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded bg-emerald-100 text-emerald-800 border border-emerald-200">
+                                  ⚡ Latest Activity
+                                </span>
+                              )}
+
+                              <span className="text-xs font-bold text-slate-900 truncate">
+                                {email.from}
+                              </span>
+                              {email.senderRole && email.senderRole !== 'UNKNOWN' && (
+                                <span
+                                  className={`text-[10px] font-semibold px-1.5 py-0.2 rounded border ${
+                                    email.senderRole === 'SUPPLIER'
+                                      ? 'bg-purple-100 text-purple-800 border-purple-200'
+                                      : email.senderRole === 'SIRIM_OFFICER'
+                                      ? 'bg-blue-100 text-blue-800 border-blue-200'
+                                      : email.senderRole === 'APPLICANT'
+                                      ? 'bg-indigo-100 text-indigo-800 border-indigo-200'
+                                      : 'bg-amber-100 text-amber-800 border-amber-200'
+                                  }`}
+                                >
+                                  {email.senderRole === 'SUPPLIER'
+                                    ? 'Supplier / ODM'
+                                    : email.senderRole === 'SIRIM_OFFICER'
+                                    ? 'SIRIM QAS'
+                                    : email.senderRole === 'APPLICANT'
+                                    ? 'Applicant'
+                                    : 'Test Lab'}
+                                </span>
+                              )}
+                              <span className="text-[10px] text-slate-400">→</span>
+                              <span className="text-xs text-slate-600 truncate">{email.to}</span>
+                            </div>
+                            <h5 className="text-xs font-semibold text-slate-900">{email.subject}</h5>
+                            {!isExpanded && (
+                              <p className="text-xs text-slate-500 line-clamp-1">{email.snippet}</p>
+                            )}
+                          </div>
+
+                          <div className="flex items-center gap-2 shrink-0">
+                            <span className="text-[11px] text-slate-400 font-medium">
+                              {formatDate(email.date)}
+                            </span>
+                            {isExpanded ? (
+                              <ChevronUp className="w-4 h-4 text-slate-400" />
+                            ) : (
+                              <ChevronDown className="w-4 h-4 text-slate-400" />
+                            )}
+                          </div>
                         </div>
-                      </div>
 
                       {isExpanded && (
                         <div className="p-4 pt-2 border-t border-slate-100 bg-slate-50/60 space-y-3">

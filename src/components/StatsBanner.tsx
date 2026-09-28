@@ -34,6 +34,7 @@ import {
   Area,
 } from 'recharts';
 import { SirimApplication, SheetSyncConfig, SirimStatus } from '../types';
+import { isActionRequired, isPendingStatement } from '../utils/actionItemUtils';
 
 interface StatsBannerProps {
   applications: SirimApplication[];
@@ -82,8 +83,9 @@ export const StatsBanner: React.FC<StatsBannerProps> = ({
     () =>
       applications.filter(
         (app) =>
-          ['RFI_ACTION_REQUIRED', 'SAMPLE_REQUESTED', 'PAYMENT_PENDING'].includes(app.status) ||
-          app.actionItems.some((a) => !a.isCompleted && a.assignedTo === 'APPLICANT')
+          ['SAMPLE_REQUESTED', 'PAYMENT_PENDING'].includes(app.status) ||
+          (app.status === 'RFI_ACTION_REQUIRED' && app.supplierStatus !== 'WAITING_FOR_SUPPLIER_DOCS') ||
+          app.actionItems.some((a) => !a.isCompleted && isActionRequired(a))
       ),
     [applications]
   );
@@ -96,8 +98,16 @@ export const StatsBanner: React.FC<StatsBannerProps> = ({
           'SAMPLE_SUBMITTED',
           'TESTING_IN_PROGRESS',
           'FINAL_EVALUATION',
-        ].includes(app.status)
+        ].includes(app.status) ||
+        (app.status === 'RFI_ACTION_REQUIRED' && app.supplierStatus === 'WAITING_FOR_SUPPLIER_DOCS')
       ),
+    [applications]
+  );
+  const pendingStatementsCount = useMemo(
+    () =>
+      applications
+        .flatMap((a) => a.actionItems)
+        .filter((act) => !act.isCompleted && isPendingStatement(act)).length,
     [applications]
   );
   const approvedList = useMemo(
@@ -108,7 +118,7 @@ export const StatsBanner: React.FC<StatsBannerProps> = ({
     () =>
       applications
         .flatMap((a) => a.actionItems)
-        .filter((act) => !act.isCompleted && act.priority === 'CRITICAL'),
+        .filter((act) => !act.isCompleted && act.priority === 'CRITICAL' && isActionRequired(act)),
     [applications]
   );
 
@@ -391,7 +401,15 @@ export const StatsBanner: React.FC<StatsBannerProps> = ({
               </span>
               <span className="text-[11px] font-medium text-slate-400">underway</span>
             </div>
-            <span className="text-[11px] text-slate-500 mt-0.5">Technical evaluation</span>
+            <span className="text-[11px] text-slate-500 mt-0.5">
+              {pendingStatementsCount > 0 ? (
+                <span className="text-purple-600 font-medium">
+                  {pendingStatementsCount} pending statement{pendingStatementsCount === 1 ? '' : 's'} (waiting)
+                </span>
+              ) : (
+                'Technical evaluation'
+              )}
+            </span>
           </div>
 
           {/* Card 4: Approved */}

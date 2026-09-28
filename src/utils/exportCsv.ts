@@ -1,4 +1,5 @@
 import { SirimApplication } from '../types';
+import { isPendingStatement } from './actionItemUtils';
 
 export function exportApplicationsToCsv(applications: SirimApplication[], filename?: string): void {
   const headers = [
@@ -17,7 +18,8 @@ export function exportApplicationsToCsv(applications: SirimApplication[], filena
     'Submission Date',
     'Last Activity Date',
     'Target SLA Deadline',
-    'Pending Actions Count',
+    'Pending Actions & Statements Count',
+    'Pending Actions & Statements List',
     'Certificate No',
     'Certificate Expiry Date',
     'Days Until Expiry',
@@ -42,7 +44,10 @@ export function exportApplicationsToCsv(applications: SirimApplication[], filena
 
     const pendingActions = (app.actionItems || [])
       .filter((a) => !a.isCompleted)
-      .map((a) => `[${a.priority}] ${a.title} (${a.assignedTo})`)
+      .map((a) => {
+        const isStmt = isPendingStatement(a);
+        return `[${isStmt ? 'PENDING_STATEMENT' : 'ACTION_REQUIRED'}|${a.priority}] ${a.title} (${a.assignedTo})`;
+      })
       .join('; ');
 
     const standardsStr = (app.standards || []).join('; ');
@@ -64,6 +69,7 @@ export function exportApplicationsToCsv(applications: SirimApplication[], filena
       app.lastActivityDate || '',
       app.targetDeadline || '',
       (app.actionItems || []).filter((a) => !a.isCompleted).length.toString(),
+      pendingActions,
       app.certificateNo || 'Pending',
       app.certificateExpiryDate || '',
       daysUntilExpiry,

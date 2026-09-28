@@ -36,20 +36,29 @@ export const TeamActivityDrawer: React.FC<TeamActivityDrawerProps> = ({
 
   if (!isOpen) return null;
 
-  const filtered = activities.filter((act) => {
-    if (selectedType !== 'ALL' && act.actionType !== selectedType) return false;
-    if (filterQuery.trim()) {
-      const q = filterQuery.toLowerCase();
-      const matchesText =
-        (act.description && act.description.toLowerCase().includes(q)) ||
-        (act.userEmail && act.userEmail.toLowerCase().includes(q)) ||
-        (act.userName && act.userName.toLowerCase().includes(q)) ||
-        (act.applicationRef && act.applicationRef.toLowerCase().includes(q)) ||
-        (act.productName && act.productName.toLowerCase().includes(q));
-      if (!matchesText) return false;
-    }
-    return true;
-  });
+  const filtered = activities
+    .filter((act) => {
+      const em = (act.userEmail || '').toLowerCase();
+      const desc = (act.description || '').toLowerCase();
+      if (em.includes('team-member') || desc.includes('team-member connected')) {
+        return false;
+      }
+      return true;
+    })
+    .filter((act) => {
+      if (selectedType !== 'ALL' && act.actionType !== selectedType) return false;
+      if (filterQuery.trim()) {
+        const q = filterQuery.toLowerCase();
+        const matchesText =
+          (act.description && act.description.toLowerCase().includes(q)) ||
+          (act.userEmail && act.userEmail.toLowerCase().includes(q)) ||
+          (act.userName && act.userName.toLowerCase().includes(q)) ||
+          (act.applicationRef && act.applicationRef.toLowerCase().includes(q)) ||
+          (act.productName && act.productName.toLowerCase().includes(q));
+        if (!matchesText) return false;
+      }
+      return true;
+    });
 
   const getActionIcon = (type: TeamActivityLog['actionType']) => {
     switch (type) {

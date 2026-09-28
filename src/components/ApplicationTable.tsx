@@ -22,6 +22,7 @@ import {
   getSupplierStatusBadgeInfo,
   getAssigneeBadgeInfo,
 } from '../utils/formatters';
+import { separateActionItems, getActionLabelInfo } from '../utils/actionItemUtils';
 
 interface ApplicationTableProps {
   applications: SirimApplication[];
@@ -58,7 +59,7 @@ export const ApplicationTable: React.FC<ApplicationTableProps> = ({
               <th className="py-3 px-4">Email Thread</th>
               <th className="py-3 px-4">Scheme</th>
               <th className="py-3 px-4">Officer & Supplier</th>
-              <th className="py-3 px-4">Pending Action Items</th>
+              <th className="py-3 px-4">Actions & Pending Statements</th>
               <th className="py-3 px-4">Target SLA</th>
               <th className="py-3 px-4">Certificate / Fee</th>
               <th className="py-3 px-4 text-right">Actions</th>
@@ -68,8 +69,9 @@ export const ApplicationTable: React.FC<ApplicationTableProps> = ({
             {applications.map((app) => {
               const statusInfo = getStatusBadgeInfo(app.status);
               const deadline = calculateDeadlineInfo(app.targetDeadline);
-              const pendingActions = app.actionItems.filter((a) => !a.isCompleted);
-              const hasCritical = pendingActions.some((a) => a.priority === 'CRITICAL');
+              const incompleteItems = app.actionItems.filter((a) => !a.isCompleted);
+              const { activeActions, pendingStatements } = separateActionItems(incompleteItems);
+              const hasCritical = activeActions.some((a) => a.priority === 'CRITICAL');
               const emailSubject = app.emailSubject || app.emailThreads?.[app.emailThreads.length - 1]?.subject || `Ref: ${app.applicationRef}`;
               const gmailUrl = getGmailThreadUrl(app);
 
@@ -180,32 +182,47 @@ export const ApplicationTable: React.FC<ApplicationTableProps> = ({
                     )}
                   </td>
 
-                  {/* 6. Pending Action Items */}
+                  {/* 6. Pending Actions & Statements */}
                   <td className="py-3 px-4 max-w-xs">
-                    {pendingActions.length > 0 ? (
+                    {incompleteItems.length > 0 ? (
                       <div className="space-y-1">
                         <div className="flex items-center gap-1.5 flex-wrap">
-                          <span
-                            className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-bold ${
-                              hasCritical
-                                ? 'bg-rose-100 text-rose-800 border border-rose-200 animate-pulse'
-                                : 'bg-amber-100 text-amber-800 border border-amber-200'
-                            }`}
-                          >
-                            <AlertTriangle className="w-3 h-3" />
-                            {pendingActions.length} Pending
-                          </span>
+                          {activeActions.length > 0 ? (
+                            <span
+                              className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-bold ${
+                                hasCritical
+                                  ? 'bg-rose-100 text-rose-800 border border-rose-200 animate-pulse'
+                                  : 'bg-amber-100 text-amber-800 border border-amber-300'
+                              }`}
+                            >
+                              <AlertTriangle className="w-3 h-3" />
+                              {activeActions.length} Action Required
+                            </span>
+                          ) : (
+                            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-bold bg-purple-100 text-purple-800 border border-purple-200">
+                              <Clock className="w-3 h-3 text-purple-600" />
+                              Pending Statement
+                            </span>
+                          )}
+
+                          {activeActions.length > 0 && pendingStatements.length > 0 && (
+                            <span className="inline-flex items-center gap-0.5 px-1 py-0.2 rounded text-[9px] font-semibold bg-purple-50 text-purple-700 border border-purple-200">
+                              +{pendingStatements.length} waiting
+                            </span>
+                          )}
+
                           {(() => {
-                            const aInfo = getAssigneeBadgeInfo(pendingActions[0].assignedTo);
+                            const primaryItem = activeActions[0] || pendingStatements[0];
+                            const labelInfo = getActionLabelInfo(primaryItem);
                             return (
-                              <span className={`text-[10px] font-medium px-1 rounded border ${aInfo.bg} ${aInfo.text} ${aInfo.border}`}>
-                                {aInfo.label}
+                              <span className={`text-[10px] font-medium px-1 rounded border ${labelInfo.bg} ${labelInfo.text} ${labelInfo.border}`}>
+                                {labelInfo.shortLabel}
                               </span>
                             );
                           })()}
                         </div>
-                        <p className="text-[11px] text-slate-600 line-clamp-1 font-medium">
-                          {pendingActions[0].title}
+                        <p className="text-[11px] text-slate-700 line-clamp-1 font-medium">
+                          {(activeActions[0] || pendingStatements[0]).title}
                         </p>
                       </div>
                     ) : (
@@ -263,7 +280,7 @@ export const ApplicationTable: React.FC<ApplicationTableProps> = ({
                   {/* 8. Actions */}
                   <td className="py-3 px-4 text-right whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
                     <div className="flex items-center justify-end gap-1.5">
-                      {pendingActions.length > 0 && (
+                      {incompleteItems.length > 0 && (
                         <button
                           onClick={() => onQuickDraftReply(app)}
                           className="px-2 py-1 rounded bg-indigo-50 text-indigo-700 hover:bg-indigo-100 border border-indigo-200 font-semibold flex items-center gap-1 transition-colors"
