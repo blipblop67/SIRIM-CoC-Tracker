@@ -27,6 +27,8 @@ import {
   AlertCircle,
   Download,
   ArrowUpDown,
+  Bot,
+  RefreshCw,
 } from 'lucide-react';
 import confetti from 'canvas-confetti';
 import {
@@ -132,6 +134,60 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({
     message: string;
     link?: string;
   } | null>(null);
+
+  // Autonomous AI Progress Evaluator state
+  const [isEvaluatingProgress, setIsEvaluatingProgress] = useState(false);
+  const [progressEvaluationResult, setProgressEvaluationResult] = useState<{
+    count: number;
+    message: string;
+    details?: string;
+  } | null>(null);
+
+  const handleEvaluateProgress = async () => {
+    setIsEvaluatingProgress(true);
+    setProgressEvaluationResult(null);
+    try {
+      const res = await fetch(`/api/applications/${encodeURIComponent(application.id)}/evaluate-progress`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
+        },
+        body: JSON.stringify({
+          userEmail: currentUserEmail,
+          application,
+        }),
+      });
+      const data = await res.json();
+      if (data.success && data.updatedApplication) {
+        onUpdateApplication(data.updatedApplication);
+        if (data.resolvedCount > 0) {
+          notificationAudio.playSuccessTone();
+          confetti({ particleCount: 60, spread: 70 });
+          setProgressEvaluationResult({
+            count: data.resolvedCount,
+            message: `AI Progress Check completed: ${data.resolvedCount} requirement(s) auto-verified & resolved from recent emails!`,
+            details: data.progressSummary,
+          });
+        } else {
+          setProgressEvaluationResult({
+            count: 0,
+            message: data.message || 'AI scanned the email threads: All remaining items are awaiting responses from supplier or SIRIM officer.',
+            details: data.progressSummary,
+          });
+        }
+      } else {
+        throw new Error(data.error || 'Failed to evaluate progress');
+      }
+    } catch (err: any) {
+      setProgressEvaluationResult({
+        count: -1,
+        message: err.message || 'Could not evaluate progress with AI.',
+      });
+    } finally {
+      setIsEvaluatingProgress(false);
+    }
+  };
 
   // Separation of active actions vs pending statements
   const incompleteItems = application.actionItems.filter((a) => !a.isCompleted);
@@ -277,6 +333,8 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({
           isCompleted: nextState,
           completedAt: nextState ? new Date().toISOString() : undefined,
           completedBy: nextState ? (currentUserEmail || 'team-member') : undefined,
+          autoResolvedByAi: nextState ? a.autoResolvedByAi : false,
+          autoResolvedReason: nextState ? a.autoResolvedReason : undefined,
         };
       }
       return a;
@@ -764,14 +822,62 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({
                     Active tasks required from Cytron compliance team, plus pending statements tracking external replies and lab reports.
                   </p>
                 </div>
-                <button
-                  onClick={() => setShowAddAction(!showAddAction)}
-                  className="flex items-center gap-1 px-3 py-1.5 text-xs font-semibold text-blue-700 bg-blue-50 hover:bg-blue-100 border border-blue-200 rounded-lg transition-colors self-start sm:self-auto shrink-0"
-                >
-                  <Plus className="w-3.5 h-3.5" />
-                  <span>{showAddAction ? 'Close Form' : 'Add Item / Statement'}</span>
-                </button>
+                <div className="flex items-center gap-2 self-start sm:self-auto shrink-0 flex-wrap">
+                  <button
+                    type="button"
+                    onClick={handleEvaluateProgress}
+                    disabled={isEvaluatingProgress}
+                    className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold text-purple-700 bg-purple-50 hover:bg-purple-100 border border-purple-200 rounded-lg transition-colors shadow-2xs disabled:opacity-50"
+                    title="AI reads the latest emails to detect fulfilled requirements and automatically check off progress"
+                  >
+                    <Sparkles className={`w-3.5 h-3.5 text-purple-600 ${isEvaluatingProgress ? 'animate-spin' : ''}`} />
+                    <span>{isEvaluatingProgress ? 'AI Reading Emails...' : 'AI Auto-Check Progress'}</span>
+                  </button>
+                  <button
+                    onClick={() => setShowAddAction(!showAddAction)}
+                    className="flex items-center gap-1 px-3 py-1.5 text-xs font-semibold text-blue-700 bg-blue-50 hover:bg-blue-100 border border-blue-200 rounded-lg transition-colors"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    <span>{showAddAction ? 'Close Form' : 'Add Item / Statement'}</span>
+                  </button>
+                </div>
               </div>
+
+              {/* Progress Evaluation Feedback Banner */}
+              {progressEvaluationResult && (
+                <div
+                  className={`p-3 rounded-xl border flex items-start justify-between gap-3 text-xs animate-in fade-in duration-200 ${
+                    progressEvaluationResult.count > 0
+                      ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
+                      : progressEvaluationResult.count === 0
+                      ? 'bg-sky-50 border-sky-200 text-sky-900'
+                      : 'bg-rose-50 border-rose-200 text-rose-900'
+                  }`}
+                >
+                  <div className="flex items-start gap-2.5">
+                    {progressEvaluationResult.count > 0 ? (
+                      <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
+                    ) : progressEvaluationResult.count === 0 ? (
+                      <Sparkles className="w-4 h-4 text-sky-600 shrink-0 mt-0.5" />
+                    ) : (
+                      <AlertCircle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+                    )}
+                    <div className="space-y-0.5">
+                      <p className="font-bold">{progressEvaluationResult.message}</p>
+                      {progressEvaluationResult.details && (
+                        <p className="text-[11px] opacity-90">{progressEvaluationResult.details}</p>
+                      )}
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setProgressEvaluationResult(null)}
+                    className="p-1 text-slate-400 hover:text-slate-600 rounded transition-colors"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              )}
 
               {/* Add Action Item / Statement Subform */}
               {showAddAction && (
@@ -1150,11 +1256,29 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({
                                   </span>
                                 )}
                                 {action.completedAt && (
-                                  <span className="text-emerald-700 font-medium">
-                                    ✓ {isStmt ? 'Resolved' : 'Completed'} {action.completedBy ? `by ${action.completedBy.split('@')[0]}` : ''} on {formatDate(action.completedAt)}
-                                  </span>
+                                  <div className="flex items-center gap-1.5 flex-wrap">
+                                    <span className="text-emerald-700 font-medium">
+                                      ✓ {isStmt ? 'Resolved' : 'Completed'} {action.completedBy ? `by ${action.completedBy.split('@')[0]}` : ''} on {formatDate(action.completedAt)}
+                                    </span>
+                                    {action.autoResolvedByAi && (
+                                      <span
+                                        className="inline-flex items-center gap-1 text-[10px] font-bold px-1.5 py-0.2 rounded bg-indigo-50 text-indigo-700 border border-indigo-200"
+                                        title={action.autoResolvedReason || 'Auto-verified by AI email scanner'}
+                                      >
+                                        <Sparkles className="w-3 h-3 text-indigo-500" />
+                                        <span>AI Verified from Email</span>
+                                      </span>
+                                    )}
+                                  </div>
                                 )}
                               </div>
+
+                              {action.autoResolvedReason && (
+                                <div className="text-[11px] text-indigo-900 bg-indigo-50/70 border border-indigo-100 rounded-lg px-2.5 py-1 flex items-center gap-1.5">
+                                  <Sparkles className="w-3 h-3 text-indigo-500 shrink-0" />
+                                  <span>{action.autoResolvedReason}</span>
+                                </div>
+                              )}
 
                             {!action.isCompleted && (
                               <button

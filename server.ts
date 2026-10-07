@@ -1141,6 +1141,10 @@ OUTPUT RULES:
 11. Extract Certificate Number and Expiry Date if approved.
 12. Extract critical active action items required by SIRIM or Lab.
 13. IMPORTANT: Extract ALL chronological timeline milestones across the entire thread history into 'timelineEvents' (e.g., initial submission, quotation issued, sample requested, RFI clarification sent, lab evaluation, approval). Also provide a single 'timelineEvent' for the latest update.
+14. AUTONOMOUS PROGRESS EVALUATION (AI REPLACES MANUAL CHECKMARK TICKING):
+    - Identify if recent communications in the thread fulfill, answer, or resolve any pending requirements or earlier RFIs.
+    - If the user/supplier sent the missing schematics/DoC/reports, or dispatched test samples, or confirmed payment, specify them in 'resolvedRequirements' with clear reasons explaining how the email proved progress.
+    - If status has advanced to APPROVED, all earlier submission/testing requirements are resolved.
 
 Return ONLY a valid JSON object matching this schema.`;
 
@@ -1299,6 +1303,17 @@ Return ONLY a valid JSON object matching this schema.`;
                     },
                   },
                   required: ["date", "title", "description", "sender", "type"],
+                },
+              },
+              resolvedRequirements: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    title: { type: Type.STRING },
+                    reason: { type: Type.STRING },
+                  },
+                  required: ["title", "reason"],
                 },
               },
             },
@@ -2510,6 +2525,26 @@ Evaluate thoroughly and return a JSON matching the schema.`;
       msg += `✨ <b>All Applications On Track!</b> No outstanding RFIs or immediate bottlenecks detected.\n\n`;
     }
 
+    // AI Autonomous Progress Updates section if any items were auto-resolved by AI
+    const autoResolvedItems = applications.flatMap((a) =>
+      (a.actionItems || [])
+        .filter((act: any) => act.isCompleted && act.autoResolvedByAi)
+        .map((act: any) => ({ app: a, action: act }))
+    ).slice(0, 5);
+
+    if (autoResolvedItems.length > 0) {
+      msg += `🤖 <b>AI Progress Tracker (Auto-Resolved from Emails):</b>\n`;
+      autoResolvedItems.forEach((item, idx) => {
+        const refName = escapeHtml(item.app.applicationRef || item.app.productName || "Application");
+        const actTitle = escapeHtml(item.action.title || "Checklist Requirement");
+        msg += `   ${idx + 1}. ✓ [${refName}] <b>${actTitle}</b>\n`;
+        if (item.action.autoResolvedReason) {
+          msg += `      ↳ <i>${escapeHtml(item.action.autoResolvedReason)}</i>\n`;
+        }
+      });
+      msg += `\n`;
+    }
+
     // Google Sheet link
     if (options.sheetUrl) {
       msg += `📈 <a href="${options.sheetUrl}"><b>📊 Open Master Google Sheet Register ↗</b></a>\n\n`;
@@ -2646,6 +2681,236 @@ Evaluate thoroughly and return a JSON matching the schema.`;
       res.json({ success: true, count: filtered.length });
     } catch (err: any) {
       res.status(500).json({ error: "Failed to delete application", details: err?.message });
+    }
+  });
+
+  // ----------------------------------------------------
+  // Autonomous AI Progress Evaluator for Application Checklist
+  // Reads email threads to determine if pending actions are fulfilled,
+  // automatically ticking checkmarks with source citations so humans don't have to.
+  // ----------------------------------------------------
+  app.post("/api/applications/:id/evaluate-progress", async (req: Request, res: Response) => {
+    try {
+      const appId = req.params.id;
+      const { userEmail, application: clientApp } = req.body;
+
+      const current = getStoredApplications();
+      let targetIdx = current.findIndex((a: any) => a.id === appId || a.applicationRef === appId);
+      let targetApp = targetIdx >= 0 ? current[targetIdx] : clientApp;
+
+      if (!targetApp) {
+        return res.status(404).json({ error: "Application not found" });
+      }
+
+      // Check for incomplete items
+      const existingActions = targetApp.actionItems || [];
+      const incompleteActions = existingActions.filter((a: any) => !a.isCompleted);
+
+      if (incompleteActions.length === 0) {
+        return res.json({
+          success: true,
+          message: "All checklist items are already marked completed.",
+          resolvedCount: 0,
+          updatedApplication: targetApp,
+        });
+      }
+
+      // Gather email thread context
+      const emailThreads = targetApp.emailThreads || [];
+      const threadTranscript = emailThreads
+        .map((m: any, idx: number) => {
+          return `--- Email Message ${idx + 1} ---
+Date: ${m.date || "N/A"}
+From: ${m.from || "N/A"} (Role: ${m.senderRole || "UNKNOWN"})
+To: ${m.to || "N/A"}
+Subject: ${m.subject || "N/A"}
+Snippet/Body:
+${m.body || m.snippet || "(No body)"}
+`;
+        })
+        .join("\n\n");
+
+      const notesContext = targetApp.notes ? `\nApplication Notes / Latest Summary:\n${targetApp.notes}` : "";
+
+      const ai = getGeminiClient();
+      const prompt = `You are an autonomous AI Regulatory Compliance Officer for Cytron Technologies Sdn Bhd.
+Your job is to read recent email communications regarding SIRIM QAS / e-ComM Type Approval certification and autonomously evaluate whether any pending requirements, RFIs, or checklist action items have been fulfilled, answered, or resolved in the emails.
+
+APPLICATION CONTEXT:
+- Reference: ${targetApp.applicationRef || "N/A"}
+- Product: ${targetApp.productName || "N/A"} (${targetApp.modelNumber || "N/A"})
+- Current Status: ${targetApp.status || "N/A"}
+- Officer: ${targetApp.officerName || "N/A"} (${targetApp.officerEmail || "N/A"})
+- Supplier: ${targetApp.supplierName || "N/A"}
+- Courier Tracking: ${targetApp.courierTracking || "N/A"}
+${notesContext}
+
+PENDING CHECKLIST / ACTION ITEMS TO EVALUATE:
+${JSON.stringify(
+  incompleteActions.map((a: any) => ({
+    id: a.id,
+    title: a.title,
+    description: a.description,
+    assignedTo: a.assignedTo,
+    requiredActionType: a.requiredActionType,
+    itemCategory: a.itemCategory,
+  })),
+  null,
+  2
+)}
+
+EMAIL THREAD TRANSCRIPTS:
+${threadTranscript || "No email transcript provided. Evaluate based on current status and application notes."}
+
+EVALUATION RULES:
+1. Examine if recent emails provide evidence that an action item is fulfilled:
+   - For document requests (e.g. schematics, test reports, Declaration of Conformity): Did supplier send them or did applicant submit them to SIRIM?
+   - For sample delivery: Did applicant provide courier tracking (PosLaju, GDEX, DHL) or did SIRIM acknowledge receiving the test sample?
+   - For fee payment: Was payment receipt sent or acknowledged?
+   - For waiting on supplier: Did supplier deliver the requested technical data/lab reports?
+   - For waiting on SIRIM: Did officer respond with review results or next steps?
+   - If the application status is 'APPROVED', all submission and testing actions are considered resolved.
+2. If an action item is resolved, provide:
+   - "actionId": the exact id of the action item
+   - "isResolved": true
+   - "reason": A crisp explanation explaining how the email proved fulfillment (e.g. "Auto-resolved: Supplier provided EMC test report and Declaration of Conformity; submitted to SIRIM officer.")
+3. Only mark as resolved if there is plausible proof or status progression. If still pending response, do not mark resolved.
+
+Return a JSON object with:
+- "evaluations": Array of { "actionId": string, "isResolved": boolean, "reason": string }
+- "overallProgressSummary": string`;
+
+      let evaluations: Array<{ actionId: string; isResolved: boolean; reason: string }> = [];
+      let progressSummary = "";
+
+      try {
+        const response = await generateContentWithRetryAndFallback(
+          ai,
+          "gemini-3.8-flash",
+          prompt,
+          {
+            responseMimeType: "application/json",
+            responseSchema: {
+              type: Type.OBJECT,
+              properties: {
+                evaluations: {
+                  type: Type.ARRAY,
+                  items: {
+                    type: Type.OBJECT,
+                    properties: {
+                      actionId: { type: Type.STRING },
+                      isResolved: { type: Type.BOOLEAN },
+                      reason: { type: Type.STRING },
+                    },
+                    required: ["actionId", "isResolved", "reason"],
+                  },
+                },
+                overallProgressSummary: { type: Type.STRING },
+              },
+              required: ["evaluations", "overallProgressSummary"],
+            },
+          },
+          "gemini-3.1-flash-lite"
+        );
+
+        const parsed = JSON.parse(response.text?.trim() || "{}");
+        evaluations = parsed.evaluations || [];
+        progressSummary = parsed.overallProgressSummary || "";
+      } catch (geminiErr: any) {
+        console.warn("AI progress evaluation fallback:", geminiErr?.message || geminiErr);
+        // Heuristic fallback evaluation
+        evaluations = incompleteActions.map((act: any) => {
+          let resolved = false;
+          let reason = "";
+
+          if (targetApp.status === "APPROVED") {
+            resolved = true;
+            reason = "Auto-resolved: Certification granted (Certificate of Conformity issued).";
+          } else if (
+            (act.requiredActionType === "SEND_SAMPLE" || act.title.toLowerCase().includes("sample")) &&
+            (targetApp.status === "SAMPLE_SUBMITTED" || targetApp.status === "TESTING_IN_PROGRESS" || targetApp.courierTracking)
+          ) {
+            resolved = true;
+            reason = `Auto-resolved: Test sample dispatched${targetApp.courierTracking ? ` (Tracking: ${targetApp.courierTracking})` : ""}.`;
+          } else if (
+            (act.requiredActionType === "PAY_FEE" || act.title.toLowerCase().includes("payment")) &&
+            (targetApp.paymentStatus === "PAID" || targetApp.status !== "PAYMENT_PENDING")
+          ) {
+            resolved = true;
+            reason = "Auto-resolved: Payment settled or acknowledged by SIRIM finance.";
+          } else if (
+            (act.requiredActionType === "WAITING_SUPPLIER" || act.assignedTo === "SUPPLIER") &&
+            (targetApp.supplierStatus === "DOCUMENTS_RECEIVED_FROM_SUPPLIER" || targetApp.supplierStatus === "DOCUMENTS_SUBMITTED_TO_SIRIM")
+          ) {
+            resolved = true;
+            reason = "Auto-resolved: Supplier delivered requested technical documents.";
+          }
+
+          return {
+            actionId: act.id,
+            isResolved: resolved,
+            reason: reason || "Awaiting further confirmation.",
+          };
+        });
+      }
+
+      // Apply resolution to target application
+      let resolvedCount = 0;
+      const updatedActionItems = existingActions.map((item: any) => {
+        if (item.isCompleted) return item;
+        const evalItem = evaluations.find((e) => e.actionId === item.id && e.isResolved);
+        if (evalItem) {
+          resolvedCount++;
+          return {
+            ...item,
+            isCompleted: true,
+            completedAt: new Date().toISOString(),
+            completedBy: "AI Autonomous Engine",
+            autoResolvedByAi: true,
+            autoResolvedAt: new Date().toISOString(),
+            autoResolvedReason: evalItem.reason || "Auto-resolved by AI based on email progress verification.",
+          };
+        }
+        return item;
+      });
+
+      targetApp = {
+        ...targetApp,
+        actionItems: updatedActionItems,
+      };
+
+      if (targetIdx >= 0) {
+        current[targetIdx] = targetApp;
+        saveStoredApplications(current);
+      } else {
+        current.unshift(targetApp);
+        saveStoredApplications(current);
+      }
+
+      if (resolvedCount > 0) {
+        recordTeamActivity({
+          userEmail: userEmail || "AI Engine",
+          actionType: "ACTION_TOGGLE",
+          applicationRef: targetApp.applicationRef,
+          productName: targetApp.productName,
+          description: `🤖 AI Progress Engine auto-resolved ${resolvedCount} checklist item(s) for [${targetApp.applicationRef || targetApp.productName}].`,
+        });
+      }
+
+      res.json({
+        success: true,
+        resolvedCount,
+        progressSummary,
+        evaluations,
+        updatedApplication: targetApp,
+        message:
+          resolvedCount > 0
+            ? `AI verified progress from emails and auto-completed ${resolvedCount} checklist item(s)!`
+            : "AI scanned the emails: No newly fulfilled items detected yet. Remaining items are still awaiting response.",
+      });
+    } catch (err: any) {
+      console.error("Error evaluating progress:", err);
+      res.status(500).json({ error: "Failed to evaluate application progress", details: err?.message || err });
     }
   });
 
@@ -3185,9 +3450,120 @@ isSirimRelated (boolean), applicationRef (string), productName (string), modelNu
                   }
                   mergedTimeline.sort((a, b) => (a.date < b.date ? -1 : 1));
 
-                  // Merge action items without duplicates
+                  // Merge action items without duplicates & evaluate AI progress auto-resolution
                   const existingActions = existing.actionItems || [];
-                  const mergedActions = [...existingActions];
+                  const newStatus = parsed.status || existing.status;
+                  const mergedActions = existingActions.map((item: any) => {
+                    if (item.isCompleted) return item;
+
+                    // 1. If status reached APPROVED, all pre-approval actions are auto-resolved
+                    if (newStatus === "APPROVED") {
+                      return {
+                        ...item,
+                        isCompleted: true,
+                        completedAt: new Date().toISOString(),
+                        completedBy: "AI Autonomous Engine",
+                        autoResolvedByAi: true,
+                        autoResolvedAt: new Date().toISOString(),
+                        autoResolvedReason: "Auto-resolved: Application granted Certificate of Conformity / Approval by SIRIM QAS.",
+                      };
+                    }
+
+                    // 2. If Gemini identified this action as resolved in resolvedRequirements
+                    const resolvedMatch = (parsed.resolvedRequirements || []).find((r: any) =>
+                      r.title && (
+                        item.title.toLowerCase().includes(r.title.toLowerCase()) ||
+                        r.title.toLowerCase().includes(item.title.toLowerCase())
+                      )
+                    );
+                    if (resolvedMatch) {
+                      return {
+                        ...item,
+                        isCompleted: true,
+                        completedAt: new Date().toISOString(),
+                        completedBy: "AI Autonomous Engine",
+                        autoResolvedByAi: true,
+                        autoResolvedAt: new Date().toISOString(),
+                        autoResolvedReason: resolvedMatch.reason || "Auto-resolved: Verified fulfillment in recent email thread.",
+                      };
+                    }
+
+                    // 3. Autonomous progress resolution heuristic based on status progression
+                    const titleLower = (item.title || "").toLowerCase();
+                    const type = item.requiredActionType;
+
+                    // If samples requested was pending, but status is now SAMPLE_SUBMITTED or TESTING_IN_PROGRESS
+                    if ((type === "SEND_SAMPLE" || titleLower.includes("sample")) &&
+                        (newStatus === "SAMPLE_SUBMITTED" || newStatus === "TESTING_IN_PROGRESS" || parsed.courierTracking)) {
+                      return {
+                        ...item,
+                        isCompleted: true,
+                        completedAt: new Date().toISOString(),
+                        completedBy: "AI Autonomous Engine",
+                        autoResolvedByAi: true,
+                        autoResolvedAt: new Date().toISOString(),
+                        autoResolvedReason: `Auto-resolved: Sample submission verified${parsed.courierTracking ? ` (Courier Tracking: ${parsed.courierTracking})` : ""}.`,
+                      };
+                    }
+
+                    // If payment was pending, but payment is now settled or status progressed
+                    if ((type === "PAY_FEE" || titleLower.includes("invoice") || titleLower.includes("payment")) &&
+                        (parsed.paymentStatus === "PAID" || (newStatus !== "PAYMENT_PENDING" && newStatus !== "REJECTED"))) {
+                      return {
+                        ...item,
+                        isCompleted: true,
+                        completedAt: new Date().toISOString(),
+                        completedBy: "AI Autonomous Engine",
+                        autoResolvedByAi: true,
+                        autoResolvedAt: new Date().toISOString(),
+                        autoResolvedReason: "Auto-resolved: Payment acknowledged or invoice settled.",
+                      };
+                    }
+
+                    // If waiting for supplier documents, but supplier documents were received or submitted to SIRIM
+                    if ((type === "WAITING_SUPPLIER" || item.assignedTo === "SUPPLIER") &&
+                        (parsed.supplierStatus === "DOCUMENTS_RECEIVED_FROM_SUPPLIER" || parsed.supplierStatus === "DOCUMENTS_SUBMITTED_TO_SIRIM" || newStatus === "UNDER_REVIEW")) {
+                      return {
+                        ...item,
+                        isCompleted: true,
+                        completedAt: new Date().toISOString(),
+                        completedBy: "AI Autonomous Engine",
+                        autoResolvedByAi: true,
+                        autoResolvedAt: new Date().toISOString(),
+                        autoResolvedReason: "Auto-resolved: Supplier provided requested CoC technical documentation.",
+                      };
+                    }
+
+                    // If waiting for SIRIM reply, and an officer update / next phase has arrived
+                    if ((type === "AWAIT_SIRIM" || item.assignedTo === "SIRIM") &&
+                        (newStatus === "RFI_ACTION_REQUIRED" || newStatus === "SAMPLE_REQUESTED" || newStatus === "APPROVED")) {
+                      return {
+                        ...item,
+                        isCompleted: true,
+                        completedAt: new Date().toISOString(),
+                        completedBy: "AI Autonomous Engine",
+                        autoResolvedByAi: true,
+                        autoResolvedAt: new Date().toISOString(),
+                        autoResolvedReason: "Auto-resolved: SIRIM officer provided update / evaluation feedback.",
+                      };
+                    }
+
+                    // If document submission to SIRIM was pending, but application is now UNDER_REVIEW
+                    if ((type === "SUBMIT_DOC" || type === "PROVIDE_CLARIFICATION") && newStatus === "UNDER_REVIEW") {
+                      return {
+                        ...item,
+                        isCompleted: true,
+                        completedAt: new Date().toISOString(),
+                        completedBy: "AI Autonomous Engine",
+                        autoResolvedByAi: true,
+                        autoResolvedAt: new Date().toISOString(),
+                        autoResolvedReason: "Auto-resolved: Documents/clarifications submitted to SIRIM; application is now under officer review.",
+                      };
+                    }
+
+                    return item;
+                  });
+
                   if (Array.isArray(parsed.actionItems)) {
                     parsed.actionItems.forEach((act: any, actIdx: number) => {
                       if (!mergedActions.some((a) => a.title.toLowerCase() === act.title.toLowerCase())) {

@@ -155,12 +155,45 @@ function sanitizeApplications(apps: SirimApplication[]): SirimApplication[] {
           mergedEmails.push(msg);
         }
       }
+      // Smartly merge action items preserving completion status and AI auto-resolutions
+      const mergedActions = [...(existing.actionItems || [])];
+      for (const newAct of app.actionItems || []) {
+        const matchIdx = mergedActions.findIndex(
+          (a) => a.title.toLowerCase().trim() === newAct.title.toLowerCase().trim()
+        );
+        if (matchIdx === -1) {
+          mergedActions.push(newAct);
+        } else if (newAct.isCompleted && !mergedActions[matchIdx].isCompleted) {
+          mergedActions[matchIdx] = {
+            ...mergedActions[matchIdx],
+            isCompleted: true,
+            completedAt: newAct.completedAt || new Date().toISOString(),
+            completedBy: newAct.completedBy,
+            autoResolvedByAi: newAct.autoResolvedByAi,
+            autoResolvedReason: newAct.autoResolvedReason,
+          };
+        }
+      }
+
+      // If status progressed to APPROVED, mark all actions resolved
+      if ((app.status === 'APPROVED' || existing.status === 'APPROVED')) {
+        mergedActions.forEach((act) => {
+          if (!act.isCompleted) {
+            act.isCompleted = true;
+            act.completedAt = new Date().toISOString();
+            act.completedBy = 'AI Autonomous Engine';
+            act.autoResolvedByAi = true;
+            act.autoResolvedReason = 'Auto-resolved: Application granted Certificate of Conformity / Approval by SIRIM QAS.';
+          }
+        });
+      }
+
       result[existingIndex] = {
         ...existing,
         ...app,
         id: existing.id, // Keep the established unique ID
         emailThreads: mergedEmails,
-        actionItems: app.actionItems?.length ? app.actionItems : existing.actionItems,
+        actionItems: mergedActions.length ? mergedActions : (app.actionItems || existing.actionItems),
         timeline: app.timeline?.length ? app.timeline : existing.timeline,
       };
     } else {

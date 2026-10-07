@@ -510,11 +510,40 @@ export const AutomationModal: React.FC<AutomationModalProps> = ({
                     )}
                   </div>
 
-                  {/* Step 2: Master Sheet Sync */}
+                  {/* Step 2: AI Autonomous Progress & Action Resolution */}
+                  <div className="p-3.5 rounded-xl border border-slate-200 hover:border-slate-300 transition-colors flex items-center justify-between bg-white">
+                    <div className="flex items-center gap-3">
+                      <div className="w-8 h-8 rounded-lg bg-purple-100 text-purple-700 flex items-center justify-center font-bold text-xs">
+                        2
+                      </div>
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <Sparkles className="w-4 h-4 text-purple-600" />
+                          <span className="text-sm font-semibold text-slate-800">
+                            Autonomous Progress Tracking & Auto-Resolution
+                          </span>
+                          <span className="text-[10px] font-bold px-1.5 py-0.2 rounded bg-purple-100 text-purple-800 border border-purple-200">
+                            Replaces Manual Checkmarks
+                          </span>
+                        </div>
+                        <p className="text-xs text-slate-500 mt-0.5">
+                          AI reads daily officer and supplier emails to autonomously evaluate progress, auto-completing actions when documents, payments, sample couriers, or approvals are detected.
+                        </p>
+                      </div>
+                    </div>
+                    <input
+                      type="checkbox"
+                      checked={localConfig.autoProgressEvaluation ?? true}
+                      onChange={(e) => handleUpdate({ autoProgressEvaluation: e.target.checked })}
+                      className="w-4 h-4 text-indigo-600 rounded border-slate-300 focus:ring-indigo-500"
+                    />
+                  </div>
+
+                  {/* Step 3: Master Sheet Sync */}
                   <div className="p-3.5 rounded-xl border border-slate-200 hover:border-slate-300 transition-colors flex items-center justify-between">
                     <div className="flex items-center gap-3">
                       <div className="w-8 h-8 rounded-lg bg-emerald-100 text-emerald-700 flex items-center justify-center font-bold text-xs">
-                        2
+                        3
                       </div>
                       <div>
                         <div className="flex items-center gap-2">
@@ -536,11 +565,11 @@ export const AutomationModal: React.FC<AutomationModalProps> = ({
                     />
                   </div>
 
-                  {/* Step 3: Telegram Briefing */}
+                  {/* Step 4: Telegram Briefing */}
                   <div className="p-3.5 rounded-xl border border-slate-200 hover:border-slate-300 transition-colors flex items-center justify-between">
                     <div className="flex items-center gap-3">
                       <div className="w-8 h-8 rounded-lg bg-indigo-100 text-indigo-700 flex items-center justify-center font-bold text-xs">
-                        3
+                        4
                       </div>
                       <div>
                         <div className="flex items-center gap-2">

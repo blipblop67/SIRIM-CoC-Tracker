@@ -49,6 +49,9 @@ export interface ActionItem {
   requiredActionType: ActionItemType;
   completedAt?: string;
   completedBy?: string;
+  autoResolvedByAi?: boolean;
+  autoResolvedReason?: string;
+  autoResolvedAt?: string;
   emailSourceSnippet?: string;
 }
 
@@ -259,11 +262,13 @@ export interface AutomationConfig {
   autoScanGmail: boolean;
   autoSyncGoogleSheet: boolean;
   autoSendTelegram: boolean;
+  autoProgressEvaluation?: boolean; // AI autonomously reads emails and updates checklist/action progress
   alertOnCriticalOnly: boolean;
   telegram: TelegramConfig;
   lastRunAt?: string;
   lastRunStatus?: 'SUCCESS' | 'WARNING' | 'ERROR' | 'IDLE';
   lastRunSummary?: string;
+  lastAiProgressUpdatesCount?: number;
   logs: AutomationLogEntry[];
   // Scan Duration Policies
   hasCompletedFirstScan?: boolean;
