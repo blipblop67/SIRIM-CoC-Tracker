@@ -320,10 +320,10 @@ export const AutomationModal: React.FC<AutomationModalProps> = ({
                   </div>
                   <div>
                     <h3 className="text-sm font-semibold text-slate-900">
-                      Enable Daily Morning Automation Pipeline
+                      Enable Autonomous Compliance Agent (Zero Human Trigger Required)
                     </h3>
                     <p className="text-xs text-slate-600 mt-0.5">
-                      Automatically runs every morning to ingest new SIRIM correspondence, update your Google Sheet, and dispatch Telegram updates.
+                      Operates hands-free in the background. Ingests new SIRIM correspondence from Gmail, auto-evaluates checklist actions with AI, syncs live records to Google Sheets, and sends urgent alerts.
                     </p>
                   </div>
                 </div>
@@ -361,23 +361,25 @@ export const AutomationModal: React.FC<AutomationModalProps> = ({
 
                 <div className="p-4 rounded-xl border border-slate-200 bg-white shadow-xs">
                   <label className="block text-xs font-semibold text-slate-700 uppercase tracking-wider mb-2">
-                    Repeat Frequency
+                    Autonomous Schedule & Cadence
                   </label>
                   <div className="flex items-center gap-2">
-                    <Calendar className="w-4 h-4 text-slate-400" />
+                    <Zap className="w-4 h-4 text-emerald-500" />
                     <select
-                      value={localConfig.intervalHours}
-                      onChange={(e) => handleUpdate({ intervalHours: parseInt(e.target.value, 10) })}
+                      value={localConfig.autonomousIntervalMinutes ?? 0}
+                      onChange={(e) => handleUpdate({ autonomousIntervalMinutes: parseInt(e.target.value, 10) })}
                       className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm text-slate-800 focus:ring-2 focus:ring-indigo-500 focus:outline-none font-medium"
                     >
-                      <option value={24}>Every 24 Hours (Daily Morning)</option>
-                      <option value={12}>Every 12 Hours (Twice Daily)</option>
-                      <option value={6}>Every 6 Hours</option>
-                      <option value={1}>Every 1 Hour (Continuous Monitoring)</option>
+                      <option value={0}>Daily Morning Only (At {localConfig.scheduleTime} MYT - Recommended)</option>
+                      <option value={15}>Daily Morning + Every 15 Min Silent Scan</option>
+                      <option value={30}>Daily Morning + Every 30 Min Silent Scan</option>
+                      <option value={60}>Daily Morning + Every 1 Hour Silent Scan</option>
                     </select>
                   </div>
                   <p className="text-[11px] text-slate-500 mt-1.5">
-                    Recommended: <strong>Every 24 Hours (Daily Morning)</strong>
+                    {localConfig.autonomousIntervalMinutes === 0
+                      ? `Every morning at ${localConfig.scheduleTime} MYT: checks Gmail, updates dashboard, syncs Google Sheet & dispatches Telegram briefing.`
+                      : `Every morning at ${localConfig.scheduleTime} MYT (with Telegram briefing) + silently scans Gmail & updates Google Sheet every ${localConfig.autonomousIntervalMinutes} minutes.`}
                   </p>
                 </div>
               </div>

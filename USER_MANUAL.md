@@ -121,11 +121,18 @@ Before submitting costly official applications or paying non-refundable SIRIM as
 
 ---
 
-## 7. Automated Daily Briefings & Telegram Bot
+## 7. Autonomous Compliance Agent (Zero Human Trigger Operation)
 
-The platform includes an automated background scheduler that can deliver daily compliance digests to your team's Telegram group or individual chat.
+Once you grant access to your **Gmail** and connect your **Master Google Sheet**, the compliance agent runs **100% autonomously in the background without requiring any human triggers**:
 
-### Setting Up Telegram Notifications:
+### How Autonomous Mode Works:
+1. **Continuous Inbox Monitoring:** The agent continuously polls your Gmail inbox on a 15-minute background loop for incoming SIRIM QAS / e-ComM messages.
+2. **AI Semantic Parsing:** Gemini AI automatically identifies new applications, status updates, sample testing requests, and official payment receipts.
+3. **Hands-Free Action Resolution:** When incoming emails contain requested documents, proof of payment, or test reports, the agent autonomously marks corresponding checklist action items as resolved.
+4. **Automatic Master Google Sheet Synchronization:** Updated application rows, SLA deadlines, and direct Gmail thread links are immediately pushed to your connected Google Sheet hands-free.
+5. **Instant Alerts & Morning Briefing:** Dispatches instant Telegram alerts for urgent RFIs and sends a comprehensive daily digest at 08:30 MYT.
+
+### Setting Up Telegram Notifications (Optional):
 1. In the header, click the **Zap (⚡)** icon or open the menu and choose **Automation & Telegram Bot**.
 2. **Create a Bot via BotFather:**
    - Open Telegram and search for `@BotFather`.
@@ -137,8 +144,8 @@ The platform includes an automated background scheduler that can deliver daily c
    - Use `@userinfobot` or call `https://api.telegram.org/bot<TOKEN>/getUpdates` to find the negative Chat ID (e.g. `-1001234567890`).
    - Paste it into the **Chat ID** field. (If using Telegram Forum Topics, enter the **Topic / Thread ID**).
 4. Click **Test Telegram Alert** to verify message delivery.
-5. Set your desired **Schedule Time** (default: `08:30` Asia/Kuala_Lumpur).
-6. Toggle **Enable Automated Scheduler** to ON.
+5. Select your desired **Autonomous Polling Cadence** (default: `Every 15 Minutes`).
+6. Set your desired **Morning Schedule Time** (default: `08:30` Asia/Kuala_Lumpur).
 7. Save settings.
 
 *Every morning at the scheduled time, the system compiles:*
@@ -174,6 +181,9 @@ Maintain an executive register spreadsheet for management and external auditors:
 ---
 
 ## 10. FAQ & Troubleshooting
+
+#### Q: Does the agent require any human triggers once access is granted?
+**A:** No. Once you sign in with your Google account (granting access to Gmail for reading SIRIM emails) and link your Master Google Sheet, the agent is 100% autonomous. It runs continuously in the background on your chosen cadence (every 15 minutes by default), auto-evaluating incoming communications, updating checklist action items, and syncing changes to your Google Sheet without any human intervention.
 
 #### Q: Where is our application data stored?
 **A:** All data is safely stored in the local server directory `./data/applications-store.json` on the hosting machine (such as your Raspberry Pi). Client web browsers cache records for instant loading and synchronize with the server every 30 seconds.

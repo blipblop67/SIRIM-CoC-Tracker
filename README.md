@@ -4,6 +4,65 @@ A modern, high-precision SaaS platform for tracking SIRIM QAS / e-ComM type appr
 
 ---
 
+## 🐙 Pushing to GitHub (Setup & Troubleshooting)
+
+The repository is already initialized with Git and pre-committed (`main` branch) with strict `.gitignore` rules that protect secrets and runtime data.
+
+### Quick Push via Helper Script
+
+```bash
+# Push with your GitHub repository URL:
+./push-to-github.sh https://github.com/<YOUR_USERNAME>/<YOUR_REPO_NAME>.git
+```
+
+---
+
+### Manual Push Step-by-Step
+
+#### 1. Set Remote Origin
+```bash
+git remote add origin https://github.com/<YOUR_USERNAME>/<YOUR_REPO_NAME>.git
+# (Or if already added: git remote set-url origin https://github.com/<YOUR_USERNAME>/<YOUR_REPO_NAME>.git)
+```
+
+#### 2. Push to GitHub
+```bash
+git branch -M main
+git push -u origin main
+```
+
+---
+
+### Common GitHub Push Errors & Solutions
+
+#### Issue 1: `Support for password authentication was removed` / `Authentication failed`
+GitHub requires a **Personal Access Token (PAT)** or SSH key instead of your account password:
+1. On GitHub, go to **Settings** → **Developer Settings** → **Personal Access Tokens** → **Tokens (classic)**.
+2. Click **Generate new token (classic)** and select the **`repo`** scope.
+3. Copy your token (e.g., `ghp_xxxxxxxxxxxx`).
+4. Push using your token in the URL:
+   ```bash
+   git remote set-url origin https://<YOUR_PAT_TOKEN>@github.com/<YOUR_USERNAME>/<YOUR_REPO_NAME>.git
+   git push -u origin main
+   ```
+*(Alternatively, use SSH: `git remote set-url origin git@github.com:<YOUR_USERNAME>/<YOUR_REPO_NAME>.git`)*
+
+#### Issue 2: `Updates were rejected because the remote contains work that you do not have locally`
+This happens if you initialized the GitHub repository with a README or License on github.com:
+```bash
+# Rebase with remote and push:
+git pull origin main --rebase --allow-unrelated-histories
+git push -u origin main
+
+# OR force push if you want this local repository to be the definitive root:
+git push -u origin main --force
+```
+
+#### Issue 3: `GH007: Your push would contain a secret` (Push Protection)
+This repository's `.gitignore` is pre-configured to exclude `.env*` and `data/*.json` (where local OAuth access tokens and live database files reside). Clean templates (`.env.example`, `data/applications-store.example.json`, `data/automation-config.example.json`) are safely tracked instead.
+
+---
+
 ## 🍓 Running on Raspberry Pi (24/7 Home/Office Server)
 
 Running this on a Raspberry Pi gives your team an always-on, centralized server with shared database storage, scheduled morning Telegram digests (08:30 MYT), and local LAN access for all team members.

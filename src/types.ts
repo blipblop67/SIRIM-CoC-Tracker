@@ -259,6 +259,7 @@ export interface AutomationConfig {
   scheduleTime: string; // e.g. "08:30" (AM)
   timezone: string; // e.g. "Asia/Kuala_Lumpur (MYT UTC+8)"
   intervalHours: number; // 24 = daily morning
+  autonomousIntervalMinutes?: number; // e.g. 15 for continuous background polling
   autoScanGmail: boolean;
   autoSyncGoogleSheet: boolean;
   autoSendTelegram: boolean;
@@ -268,6 +269,7 @@ export interface AutomationConfig {
   lastRunAt?: string;
   lastRunStatus?: 'SUCCESS' | 'WARNING' | 'ERROR' | 'IDLE';
   lastRunSummary?: string;
+  lastDailyDigestDate?: string;
   lastAiProgressUpdatesCount?: number;
   logs: AutomationLogEntry[];
   // Scan Duration Policies
@@ -276,6 +278,16 @@ export interface AutomationConfig {
   firstScanDurationDays?: number; // default 365 days (1 whole year)
   routineScanDurationDays?: number; // default 30 days (1 month)
   scanScopeMode?: 'auto' | 'first_time_1y' | 'routine_1m' | 'custom';
+  // Stored active session & sheet configuration for backend daemon
+  activeSession?: {
+    accessToken?: string;
+    email?: string;
+    name?: string;
+    picture?: string;
+    expiresAt?: number;
+    updatedAt?: string;
+  } | null;
+  sheetConfig?: SheetSyncConfig | null;
 }
 
 export interface UserPresence {

@@ -6,3 +6,8 @@ coverage/
 *.log
 .env*
 !.env.example
+
+# Runtime local data & active session tokens (prevents GH007 secret scanning blocks)
+data/*.json
+!data/*.example.json
+!data/.gitkeep

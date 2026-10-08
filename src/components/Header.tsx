@@ -168,19 +168,19 @@ export const Header: React.FC<HeaderProps> = ({
           {/* Automation Status */}
           <button
             onClick={onOpenAutomationModal}
-            className={`flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium border transition-colors ${
+            className={`flex items-center gap-1.5 px-2 py-1 rounded-md text-[11px] font-medium border transition-colors ${
               automationConfig.enabled
                 ? 'bg-slate-50 border-slate-200 text-slate-700 hover:bg-slate-100'
                 : 'bg-slate-50 border-slate-200 text-slate-400 hover:text-slate-600'
             }`}
-            title="Automation & Telegram digest settings"
+            title={`Autonomous Agent: ${automationConfig.enabled ? `Active (${automationConfig.autonomousIntervalMinutes || 15}m loop + ${automationConfig.scheduleTime} morning briefing)` : 'Disabled'}`}
           >
             <Zap
               className={`w-3 h-3 ${
                 automationConfig.enabled ? 'text-amber-500 fill-amber-500' : 'text-slate-400'
               }`}
             />
-            <span>{automationConfig.enabled ? automationConfig.scheduleTime : 'Off'}</span>
+            <span>{automationConfig.enabled ? `Auto (${automationConfig.autonomousIntervalMinutes || 15}m)` : 'Auto: Off'}</span>
             {isTelegramReady && <Send className="w-2.5 h-2.5 text-sky-500 ml-0.5" />}
           </button>
         </div>

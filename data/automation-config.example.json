@@ -1,0 +1,27 @@
+{
+  "enabled": true,
+  "scheduleTime": "08:30",
+  "timezone": "Asia/Kuala_Lumpur",
+  "intervalHours": 24,
+  "autonomousIntervalMinutes": 0,
+  "autoScanGmail": true,
+  "autoSyncGoogleSheet": true,
+  "autoSendTelegram": true,
+  "autoProgressEvaluation": true,
+  "alertOnCriticalOnly": false,
+  "hasCompletedFirstScan": false,
+  "firstScanDurationDays": 365,
+  "routineScanDurationDays": 30,
+  "scanScopeMode": "auto",
+  "activeSession": null,
+  "sheetConfig": null,
+  "telegram": {
+    "botToken": "",
+    "chatId": "",
+    "topicId": "",
+    "enabled": true,
+    "dailyDigest": true,
+    "instantAlertOnCritical": true
+  },
+  "logs": []
+}

@@ -385,13 +385,30 @@ export const UserManualModal: React.FC<UserManualModalProps> = ({
             {activeSection === 'automation' && (
               <div className="space-y-4">
                 <div className="border-b border-slate-100 pb-3">
-                  <h3 className="text-lg font-bold text-slate-900">5. Telegram Digest & 24/7 Automation</h3>
+                  <h3 className="text-lg font-bold text-slate-900">5. Autonomous Hands-Free Agent & Telegram Digest</h3>
                   <p className="text-xs text-slate-500 mt-1">
-                    Receive morning briefings on your phone or in your engineering team chat.
+                    How the autonomous compliance agent executes tasks 24/7 without requiring a human trigger.
                   </p>
                 </div>
 
                 <div className="space-y-3 text-xs">
+                  <div className="p-3.5 rounded-xl border border-emerald-200 bg-emerald-50/50">
+                    <h4 className="font-semibold text-emerald-950 text-xs mb-1 flex items-center gap-1.5">
+                      <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+                      Autonomous Agent Workflow (Zero Human Trigger)
+                    </h4>
+                    <p className="text-slate-700 text-[11px] leading-relaxed">
+                      Once you authorize your <strong>Google Account</strong> (for Gmail reading) and link your <strong>Google Sheet</strong> (for live registry sync), the agent takes over completely hands-free:
+                    </p>
+                    <ol className="list-decimal list-inside space-y-1 text-slate-600 text-[11px] mt-2">
+                      <li><strong>Continuous Background Monitoring:</strong> Automatically polls your Gmail inbox every 15 minutes for new SIRIM QAS / e-ComM emails.</li>
+                      <li><strong>AI Evaluation & Parsing:</strong> Gemini AI reads officer queries, extract CoC application numbers, status shifts, and invoice attachments.</li>
+                      <li><strong>Auto-Completion of Action Items:</strong> When a document, payment receipt, or lab test report is delivered, the agent autonomously marks the corresponding requirement resolved.</li>
+                      <li><strong>Hands-Free Google Sheet Sync:</strong> Changes are immediately pushed to your connected Master Google Sheet without anyone needing to click "Sync".</li>
+                      <li><strong>Automated Telegram Alerts:</strong> Instant notifications for critical officer RFIs plus scheduled 08:30 MYT morning briefings.</li>
+                    </ol>
+                  </div>
+
                   <div className="p-3.5 rounded-xl border border-slate-200">
                     <h4 className="font-semibold text-slate-900 text-xs mb-1">Configuring Telegram Bot</h4>
                     <ol className="list-decimal list-inside space-y-1 text-slate-600 text-[11px]">
@@ -404,9 +421,9 @@ export const UserManualModal: React.FC<UserManualModalProps> = ({
                   </div>
 
                   <div className="p-3.5 rounded-xl border border-slate-200">
-                    <h4 className="font-semibold text-slate-900 text-xs mb-1">Morning Schedule</h4>
+                    <h4 className="font-semibold text-slate-900 text-xs mb-1">Morning Schedule & Polling Cadence</h4>
                     <p className="text-slate-600 text-[11px]">
-                      Default scheduled time is <strong>08:30 (Asia/Kuala_Lumpur)</strong>. The system prepares an executive breakdown of critical tasks due today, outstanding RFIs, and approvals.
+                      Autonomous polling runs continuously on your chosen cadence (e.g. <strong>every 15 minutes</strong>), and a comprehensive executive morning digest is dispatched at <strong>08:30 MYT</strong> daily.
                     </p>
                   </div>
                 </div>

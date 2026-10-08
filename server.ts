@@ -575,20 +575,27 @@ async function startServer() {
   const ACTIVITY_FILE = path.join(DATA_DIR, "team-activity.json");
   const PRESENCE_FILE = path.join(DATA_DIR, "user-presence.json");
 
+  // Forward declaration for triggering autonomous cycle from any handler
+  let triggerAutonomousRunSafely: (source: string, userEmail?: string) => void = () => {};
+
   function getStoredAutomationConfig() {
     const defaults = {
       enabled: true,
       scheduleTime: "08:30",
       timezone: "Asia/Kuala_Lumpur",
       intervalHours: 24,
+      autonomousIntervalMinutes: 0,
       autoScanGmail: true,
       autoSyncGoogleSheet: true,
       autoSendTelegram: true,
+      autoProgressEvaluation: true,
       alertOnCriticalOnly: false,
       hasCompletedFirstScan: false,
       firstScanDurationDays: 365,
       routineScanDurationDays: 30,
       scanScopeMode: "auto",
+      activeSession: null,
+      sheetConfig: null,
       telegram: {
         botToken: process.env.TELEGRAM_BOT_TOKEN || "",
         chatId: process.env.TELEGRAM_CHAT_ID || "",
@@ -1851,6 +1858,22 @@ Evaluate thoroughly and return a JSON matching the schema.`;
         },
       });
 
+      // Automatically register new sheet into central autonomous config
+      try {
+        const autoConfig = getStoredAutomationConfig();
+        autoConfig.sheetConfig = {
+          spreadsheetId,
+          spreadsheetUrl,
+          sheetName: "Active CoC Applications",
+          autoSync: true,
+          rowsCount: rowsData.length,
+          lastSynced: new Date().toISOString(),
+        };
+        autoConfig.enabled = true;
+        autoConfig.autoSyncGoogleSheet = true;
+        saveStoredAutomationConfig(autoConfig);
+      } catch (e) {}
+
       res.json({
         success: true,
         spreadsheetId,
@@ -2605,6 +2628,86 @@ Evaluate thoroughly and return a JSON matching the schema.`;
     }
   });
 
+  // ----------------------------------------------------
+  // Autonomous Agent: Session and Sheet Registration
+  // ----------------------------------------------------
+  app.post("/api/automation/session", async (req: Request, res: Response) => {
+    try {
+      const { accessToken, email, name, picture, expiresAt } = req.body;
+      if (!accessToken) {
+        return res.status(400).json({ error: "accessToken is required" });
+      }
+
+      const config = getStoredAutomationConfig();
+      config.activeSession = {
+        accessToken,
+        email: email || "team-member@cytron.io",
+        name: name || "",
+        picture: picture || "",
+        expiresAt: expiresAt || Date.now() + 3600 * 1000,
+        updatedAt: new Date().toISOString(),
+      };
+      config.enabled = true;
+      config.autoScanGmail = true;
+      config.autoProgressEvaluation = true;
+      saveStoredAutomationConfig(config);
+
+      // If Google Sheet is already configured, autonomously trigger a pipeline run immediately
+      let triggeredAutonomousRun = false;
+      if (config.sheetConfig?.spreadsheetId) {
+        triggeredAutonomousRun = true;
+        triggerAutonomousRunSafely("CREDENTIALS_LINKED", email);
+      }
+
+      res.json({
+        success: true,
+        message: "Google account authorized for autonomous agent.",
+        triggeredAutonomousRun,
+        config,
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: "Failed to register session", details: err?.message });
+    }
+  });
+
+  app.post("/api/automation/sheet-config", async (req: Request, res: Response) => {
+    try {
+      const { spreadsheetId, sheetName, spreadsheetUrl, autoSync = true } = req.body;
+      if (!spreadsheetId) {
+        return res.status(400).json({ error: "spreadsheetId is required" });
+      }
+
+      const config = getStoredAutomationConfig();
+      config.sheetConfig = {
+        spreadsheetId,
+        sheetName: sheetName || "Active CoC Applications",
+        spreadsheetUrl: spreadsheetUrl || `https://docs.google.com/spreadsheets/d/${spreadsheetId}/edit`,
+        autoSync: Boolean(autoSync),
+        lastSynced: new Date().toISOString(),
+      };
+      config.enabled = true;
+      config.autoSyncGoogleSheet = true;
+      config.autoProgressEvaluation = true;
+      saveStoredAutomationConfig(config);
+
+      // If active session token is present, autonomously trigger an immediate pipeline run
+      let triggeredAutonomousRun = false;
+      if (config.activeSession?.accessToken) {
+        triggeredAutonomousRun = true;
+        triggerAutonomousRunSafely("SHEET_LINKED", config.activeSession.email);
+      }
+
+      res.json({
+        success: true,
+        message: "Google Sheet linked for autonomous agent.",
+        triggeredAutonomousRun,
+        config,
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: "Failed to register sheet config", details: err?.message });
+    }
+  });
+
   app.post("/api/automation/sync-apps", (req: Request, res: Response) => {
     try {
       const { applications, userEmail } = req.body;
@@ -3110,9 +3213,25 @@ Return a JSON object with:
   });
 
   // ----------------------------------------------------
-  // 11. Automated Morning Engine: Run Full End-to-End Pipeline
+  // 11. Autonomous Compliance Engine: Core End-to-End Pipeline
   // ----------------------------------------------------
-  app.post("/api/automation/run", async (req: Request, res: Response) => {
+  interface AutonomousPipelineParams {
+    applications?: any[];
+    sheetConfig?: any;
+    spreadsheetId?: string;
+    sheetName?: string;
+    spreadsheetUrl?: string;
+    telegramConfig?: any;
+    autoScanGmail?: boolean;
+    autoSyncSheet?: boolean;
+    autoSendTelegram?: boolean;
+    options?: any;
+    userEmail?: string;
+    accessToken?: string | null;
+    triggerSource?: string;
+  }
+
+  async function runAutonomousPipelineCore(params: AutonomousPipelineParams = {}) {
     const logs: Array<{ timestamp: string; type: string; status: string; message: string; details?: string }> = [];
     const addLog = (type: string, status: string, message: string, details?: string) => {
       logs.push({
@@ -3124,6 +3243,9 @@ Return a JSON object with:
       });
     };
 
+    const storedConfig = getStoredAutomationConfig();
+    const triggerSource = params.triggerSource || "AUTONOMOUS_DAEMON";
+
     try {
       const {
         applications = [],
@@ -3131,26 +3253,29 @@ Return a JSON object with:
         spreadsheetId,
         sheetName,
         spreadsheetUrl,
-        telegramConfig,
+        telegramConfig: directTelegramConfig,
         autoScanGmail: directAutoScan,
         autoSyncSheet: directAutoSync,
         autoSendTelegram: directAutoTelegram,
         options = {},
-        userEmail,
-      } = req.body;
+      } = params;
+
+      const accessToken = params.accessToken || storedConfig.activeSession?.accessToken || null;
+      const userEmail = params.userEmail || storedConfig.activeSession?.email || "autonomous-agent@cytron.io";
 
       const sheetConfig = directSheetConfig || (spreadsheetId ? {
         spreadsheetId,
         sheetName: sheetName || "Active CoC Applications",
         spreadsheetUrl: spreadsheetUrl || `https://docs.google.com/spreadsheets/d/${spreadsheetId}/edit`,
-      } : null);
+      } : null) || storedConfig.sheetConfig || null;
 
-      const autoScanGmail = options.autoScanGmail !== undefined ? options.autoScanGmail : (directAutoScan !== undefined ? directAutoScan : true);
-      const autoSyncSheet = options.autoSyncSheet !== undefined ? options.autoSyncSheet : (directAutoSync !== undefined ? directAutoSync : true);
-      const autoSendTelegram = options.autoSendTelegram !== undefined ? options.autoSendTelegram : (directAutoTelegram !== undefined ? directAutoTelegram : true);
+      const telegramConfig = directTelegramConfig || storedConfig.telegram || null;
+
+      const autoScanGmail = options.autoScanGmail !== undefined ? options.autoScanGmail : (directAutoScan !== undefined ? directAutoScan : (storedConfig.autoScanGmail ?? true));
+      const autoSyncSheet = options.autoSyncSheet !== undefined ? options.autoSyncSheet : (directAutoSync !== undefined ? directAutoSync : (storedConfig.autoSyncGoogleSheet ?? true));
+      const autoSendTelegram = options.autoSendTelegram !== undefined ? options.autoSendTelegram : (directAutoTelegram !== undefined ? directAutoTelegram : (storedConfig.autoSendTelegram ?? true));
 
       // Load stored automation config to check first-time vs routine policy
-      const storedConfig = getStoredAutomationConfig();
       const isFirstScan = options.isFirstScan !== undefined
         ? Boolean(options.isFirstScan)
         : !storedConfig.hasCompletedFirstScan;
@@ -3164,12 +3289,10 @@ Return a JSON object with:
 
       // Multi-User Central Store: Merge client payload with server-stored applications
       const serverApps = getStoredApplications();
-      let currentApplications = mergeApplicationsList(serverApps, applications, req.body.userEmail);
+      let currentApplications = mergeApplicationsList(serverApps, applications, userEmail);
       let newEmailsDetected = 0;
-      const authHeader = req.headers.authorization;
-      const accessToken = authHeader && authHeader.startsWith("Bearer ") ? authHeader.split(" ")[1] : null;
 
-      addLog("SYSTEM", "INFO", `Started automated SIRIM morning synchronization cycle (${isFirstScan ? "First-Time Historical Mode" : "Routine Scan Mode"}).`);
+      addLog("SYSTEM", "INFO", `Started automated SIRIM synchronization cycle (${triggerSource}: ${isFirstScan ? "First-Time Historical Mode" : "Routine Scan Mode"}).`);
 
       // STEP 1: Scan Gmail if access token provided & autoScan enabled
       if (autoScanGmail && accessToken) {
@@ -3766,13 +3889,49 @@ isSirimRelated (boolean), applicationRef (string), productName (string), modelNu
         addLog("SHEET_SYNC", "INFO", "Google Sheet sync skipped (no configured sheet ID or disabled).");
       }
 
-      // STEP 3: Dispatch Telegram Digest / Notification
+      // STEP 3: Dispatch Telegram Digest / Notification (STRICT SPAM PREVENTION)
       let telegramSent = false;
       const tgBotToken = telegramConfig?.botToken || process.env.TELEGRAM_BOT_TOKEN;
       const tgChatId = telegramConfig?.chatId || process.env.TELEGRAM_CHAT_ID;
 
-      if (autoSendTelegram && tgBotToken && tgChatId) {
-        addLog("TELEGRAM", "INFO", `Formatting and sending morning briefing to Telegram Chat (${tgChatId})...`);
+      // Rate limit check: Strict cooldown enforcement
+      // - 5 minutes cooldown EVEN FOR MANUAL CLICKS (prevents UI button double-clicking from spamming)
+      // - 30 minutes cooldown for any automated alert
+      const nowMs = Date.now();
+      const lastTelegramSentMs = storedConfig.lastTelegramSentAt ? new Date(storedConfig.lastTelegramSentAt).getTime() : 0;
+      const minCooldownMs = triggerSource === "MANUAL_CLICK" ? 5 * 60 * 1000 : 30 * 60 * 1000;
+      const isCooldownActive = (nowMs - lastTelegramSentMs < minCooldownMs);
+
+      // Telegram should ONLY ever be sent if:
+      // A) It is a scheduled morning digest (triggerSource === "SCHEDULED_MORNING") AND daily digest hasn't been sent today, OR
+      // B) A user explicitly clicked "Run Automation Now" / "Send Telegram" in UI (triggerSource === "MANUAL_CLICK"), OR
+      // C) A brand new critical RFI was detected in THIS specific cycle that has NEVER been alerted before
+      const isMorningDigestTrigger = (triggerSource === "SCHEDULED_MORNING");
+      const isManualTrigger = (triggerSource === "MANUAL_CLICK");
+
+      if (!Array.isArray(storedConfig.alertedCriticalItemIds)) {
+        storedConfig.alertedCriticalItemIds = [];
+      }
+
+      // Only consider critical items that have not yet been alerted
+      const unalertedCriticalActions = (newEmailsDetected > 0)
+        ? currentApplications.flatMap((a) =>
+            (a.actionItems || [])
+              .filter((act: any) => !act.isCompleted && act.priority === 'CRITICAL' && !storedConfig.alertedCriticalItemIds.includes(act.id))
+              .map((act: any) => ({ app: a, action: act }))
+          )
+        : [];
+      const hasBrandNewCriticalRfi = unalertedCriticalActions.length > 0;
+
+      // Only allow Telegram if configured, not in cooldown, and is one of the 3 approved triggers
+      const shouldSendTelegram = Boolean(autoSendTelegram || (hasBrandNewCriticalRfi && telegramConfig?.instantAlertOnCritical)) &&
+        Boolean(tgBotToken) &&
+        Boolean(tgChatId) &&
+        !isCooldownActive &&
+        (isMorningDigestTrigger || isManualTrigger || (hasBrandNewCriticalRfi && telegramConfig?.instantAlertOnCritical));
+
+      if (shouldSendTelegram) {
+        addLog("TELEGRAM", "INFO", `Sending notification to Telegram Chat (${tgChatId})...`);
         try {
           const briefingText = formatTelegramBriefing(currentApplications, {
             sheetUrl: sheetConfig?.spreadsheetUrl,
@@ -3784,12 +3943,31 @@ isSirimRelated (boolean), applicationRef (string), productName (string), modelNu
           });
 
           telegramSent = true;
-          addLog("TELEGRAM", "SUCCESS", "Telegram morning digest and urgent alerts successfully delivered.");
+          storedConfig.lastTelegramSentAt = new Date().toISOString();
+
+          // Mark brand new critical items as alerted so they never trigger another alert
+          if (hasBrandNewCriticalRfi) {
+            storedConfig.alertedCriticalItemIds = [
+              ...storedConfig.alertedCriticalItemIds,
+              ...unalertedCriticalActions.map((item) => item.action.id),
+            ].slice(-200);
+          }
+
+          addLog("TELEGRAM", "SUCCESS", "Telegram notification delivered successfully.");
         } catch (tgErr: any) {
           addLog("TELEGRAM", "ERROR", `Telegram delivery failed: ${tgErr?.message || tgErr}`);
         }
       } else {
-        addLog("TELEGRAM", "INFO", "Telegram dispatch skipped (bot token or chat ID not configured).");
+        if (isCooldownActive) {
+          const minutesLeft = Math.ceil((minCooldownMs - (nowMs - lastTelegramSentMs)) / 60000);
+          addLog("TELEGRAM", "INFO", `Telegram notification suppressed: Cooldown active (${minutesLeft}m remaining to prevent spam).`);
+        } else if (!autoSendTelegram && !hasBrandNewCriticalRfi && !isManualTrigger && !isMorningDigestTrigger) {
+          addLog("TELEGRAM", "INFO", "Telegram briefing skipped: Routine autonomous cycle (runs silently without Telegram spam).");
+        } else if (!tgBotToken || !tgChatId) {
+          addLog("TELEGRAM", "INFO", "Telegram dispatch skipped (not configured).");
+        } else {
+          addLog("TELEGRAM", "INFO", "Telegram briefing skipped (conditions not met).");
+        }
       }
 
       // Persist the combined, updated applications to central server storage
@@ -3802,11 +3980,19 @@ isSirimRelated (boolean), applicationRef (string), productName (string), modelNu
         details: { newEmailsDetected, sheetSyncSuccess, telegramSent },
       });
 
-      addLog("SYSTEM", "SUCCESS", "Automated synchronization pipeline completed successfully.");
+      addLog("SYSTEM", "SUCCESS", `Automated synchronization pipeline completed successfully (${triggerSource}).`);
 
-      res.json({
+      // Update central automation config with run results
+      storedConfig.lastRunAt = new Date().toISOString();
+      storedConfig.lastRunStatus = "SUCCESS";
+      storedConfig.lastRunSummary = `Autonomous cycle completed (${triggerSource}, ${isFirstScan ? "1-Year Ingestion" : "1-Month Routine"}): ${newEmailsDetected} new emails, ${sheetSyncSuccess ? "Sheet updated" : "Sheet skipped"}, ${telegramSent ? "Telegram delivered" : "Telegram skipped"}.`;
+      if (!Array.isArray(storedConfig.logs)) storedConfig.logs = [];
+      storedConfig.logs = [...logs, ...storedConfig.logs].slice(0, 100);
+      saveStoredAutomationConfig(storedConfig);
+
+      return {
         success: true,
-        summary: `Cycle finished (${isFirstScan ? "1-Year Historical Ingestion" : "1-Month Routine Scan"}): ${newEmailsDetected} new emails detected, ${sheetSyncSuccess ? "Sheet updated" : "Sheet skipped"}, ${telegramSent ? "Telegram sent" : "Telegram skipped"}.`,
+        summary: `Cycle finished (${triggerSource}, ${isFirstScan ? "1-Year Historical Ingestion" : "1-Month Routine Scan"}): ${newEmailsDetected} new emails detected, ${sheetSyncSuccess ? "Sheet updated" : "Sheet skipped"}, ${telegramSent ? "Telegram sent" : "Telegram skipped"}.`,
         applications: currentApplications,
         updatedApplications: currentApplications,
         sheetSyncResult: { success: sheetSyncSuccess },
@@ -3818,15 +4004,72 @@ isSirimRelated (boolean), applicationRef (string), productName (string), modelNu
         newEmailsDetected,
         sheetSyncSuccess,
         telegramSent,
+        triggerSource,
         logs,
-      });
+      };
     } catch (err: any) {
-      console.error("Error in automation/run:", err);
+      console.error(`Error in autonomous pipeline (${triggerSource}):`, err);
       addLog("SYSTEM", "ERROR", `Automation pipeline encountered error: ${err?.message || err}`);
-      res.status(500).json({
+      const fallbackApps = getStoredApplications();
+      return {
+        success: false,
         error: "Automation execution encountered an error",
         details: err?.message || String(err),
         logs,
+        applications: fallbackApps,
+        updatedApplications: fallbackApps,
+        sheetSyncResult: { success: false },
+        scanResult: { threadsFound: 0 },
+        newEmailsDetected: 0,
+        sheetSyncSuccess: false,
+        telegramSent: false,
+        triggerSource,
+      };
+    }
+  }
+
+  // Bind triggerAutonomousRunSafely implementation
+  triggerAutonomousRunSafely = (source: string, userEmail?: string) => {
+    setTimeout(() => {
+      runAutonomousPipelineCore({
+        triggerSource: source,
+        userEmail,
+        autoSendTelegram: false, // Hands-free credentials/sheet setup runs completely silent without Telegram
+      }).catch((err) => {
+        console.error(`[triggerAutonomousRunSafely] Error running cycle (${source}):`, err);
+      });
+    }, 1200);
+  };
+
+  // ----------------------------------------------------
+  // 11. Automated Engine: Run Full End-to-End Pipeline (HTTP Route)
+  // ----------------------------------------------------
+  app.post("/api/automation/run", async (req: Request, res: Response) => {
+    try {
+      const authHeader = req.headers.authorization;
+      const accessToken = authHeader && authHeader.startsWith("Bearer ") ? authHeader.split(" ")[1] : null;
+
+      // Distinguish explicit manual button clicks from routine autonomous / quiet calls
+      const isManualClick = req.body.isManualClick === true || req.body.triggerSource === "MANUAL_CLICK";
+      const triggerSource = isManualClick ? "MANUAL_CLICK" : (req.body.triggerSource || "AUTONOMOUS_CYCLE");
+      const autoSendTelegram = isManualClick ? Boolean(req.body.options?.autoSendTelegram ?? true) : false;
+
+      const result = await runAutonomousPipelineCore({
+        ...req.body,
+        accessToken: accessToken || req.body.accessToken,
+        triggerSource,
+        autoSendTelegram,
+      });
+
+      if (!result.success && result.error) {
+        return res.status(500).json(result);
+      }
+      res.json(result);
+    } catch (err: any) {
+      console.error("Error in automation/run:", err);
+      res.status(500).json({
+        error: "Automation execution encountered an error",
+        details: err?.message || String(err),
       });
     }
   });
@@ -3871,19 +4114,21 @@ isSirimRelated (boolean), applicationRef (string), productName (string), modelNu
 
   // ----------------------------------------------------
   // Background Autonomous Scheduler Engine (Server-side)
-  // Runs 24/7 on local Node server or Cloud Run, checking every 60s
+  // Runs 24/7 on local Node server or Cloud Run, checking every 30s
   // ----------------------------------------------------
+  let isAutonomousRunning = false;
+  let lastAutonomousIntervalMs = Date.now();
+
   setInterval(async () => {
     try {
       const config = getStoredAutomationConfig();
       if (!config || !config.enabled) return;
 
-      const tgBotToken = (config.telegram?.botToken || process.env.TELEGRAM_BOT_TOKEN || "").trim();
-      const tgChatId = (config.telegram?.chatId || process.env.TELEGRAM_CHAT_ID || "").trim();
-
-      if (!config.autoSendTelegram || !tgBotToken || !tgChatId) return;
-
       const now = new Date();
+      const nowMs = now.getTime();
+      const intervalMinutes = config.autonomousIntervalMinutes !== undefined ? config.autonomousIntervalMinutes : 0;
+      const intervalMs = intervalMinutes * 60 * 1000;
+
       // Date in Asia/Kuala_Lumpur (YYYY-MM-DD)
       const mytDate = new Intl.DateTimeFormat("en-CA", {
         timeZone: "Asia/Kuala_Lumpur",
@@ -3901,59 +4146,37 @@ isSirimRelated (boolean), applicationRef (string), productName (string), modelNu
       }).format(now);
 
       const targetTime = config.scheduleTime || "08:30";
+      const isMorningScheduledTime = (mytTime >= targetTime && config.lastDailyDigestDate !== mytDate);
+      const isPeriodicIntervalDue = intervalMinutes > 0 && (nowMs - lastAutonomousIntervalMs >= intervalMs);
 
-      // Check last run date
-      let lastRunDate = null;
-      if (config.lastRunAt) {
+      if ((isMorningScheduledTime || isPeriodicIntervalDue) && !isAutonomousRunning) {
+        isAutonomousRunning = true;
+        lastAutonomousIntervalMs = nowMs;
+
+        const triggerSource = isMorningScheduledTime ? "SCHEDULED_MORNING" : "AUTONOMOUS_DAEMON";
+        console.log(`[Autonomous Scheduler] Triggering autonomous compliance cycle (${triggerSource}) at ${mytTime} MYT...`);
+
+        if (isMorningScheduledTime) {
+          config.lastDailyDigestDate = mytDate;
+          saveStoredAutomationConfig(config);
+        }
+
         try {
-          lastRunDate = new Intl.DateTimeFormat("en-CA", {
-            timeZone: "Asia/Kuala_Lumpur",
-            year: "numeric",
-            month: "2-digit",
-            day: "2-digit",
-          }).format(new Date(config.lastRunAt));
-        } catch (e) {}
-      }
-
-      // If already ran today in MYT, do not duplicate
-      if (lastRunDate === mytDate) {
-        return;
-      }
-
-      // If reached or passed target scheduled time today
-      if (mytTime >= targetTime) {
-        console.log(`[Autonomous Scheduler] Triggering morning Telegram briefing for ${mytDate} at ${mytTime} MYT (Scheduled: ${targetTime})`);
-        
-        const apps = getStoredApplications();
-        const briefingText = formatTelegramBriefing(apps, {
-          title: "SIRIM CoC Daily Morning Briefing",
-        });
-
-        await sendTelegramRawMessage(tgBotToken, tgChatId, briefingText, {
-          topicId: config.telegram?.topicId,
-        });
-
-        config.lastRunAt = new Date().toISOString();
-        config.lastRunStatus = "SUCCESS";
-        config.lastRunSummary = `Autonomous morning digest delivered to Telegram (${apps.length} active apps, ${mytDate} at ${mytTime} MYT).`;
-        
-        if (!Array.isArray(config.logs)) config.logs = [];
-        config.logs.unshift({
-          id: `log-${Date.now()}`,
-          timestamp: new Date().toISOString(),
-          type: "TELEGRAM",
-          status: "SUCCESS",
-          message: `Autonomous morning briefing delivered to Telegram Chat (${tgChatId}).`,
-        });
-        if (config.logs.length > 50) config.logs = config.logs.slice(0, 50);
-
-        saveStoredAutomationConfig(config);
-        console.log(`[Autonomous Scheduler] Telegram morning briefing delivered successfully.`);
+          await runAutonomousPipelineCore({
+            triggerSource,
+            userEmail: config.activeSession?.email || "autonomous-agent@cytron.io",
+            autoSendTelegram: isMorningScheduledTime === true, // ONLY send Telegram briefing for scheduled morning digest! Routine intervals run silently.
+          });
+        } catch (schedErr: any) {
+          console.error(`[Autonomous Scheduler] Error during cycle (${triggerSource}):`, schedErr?.message || schedErr);
+        } finally {
+          isAutonomousRunning = false;
+        }
       }
     } catch (schedErr: any) {
       console.error("[Autonomous Scheduler] Error during automation tick:", schedErr?.message || schedErr);
     }
-  }, 60000);
+  }, 30000);
 
   app.listen(PORT, "0.0.0.0", () => {
     console.log(`SIRIM CoC Progress Tracker Server running on port ${PORT}`);

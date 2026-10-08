@@ -72,6 +72,27 @@ class NotificationAudio {
       console.warn('Audio success tone error', e);
     }
   }
+
+  // Soft gentle tone for background autonomous updates
+  playNoticeTone() {
+    try {
+      const ctx = this.getContext();
+      if (!ctx) return;
+      const now = ctx.currentTime;
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(659.25, now);
+      gain.gain.setValueAtTime(0.03, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.2);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(now);
+      osc.stop(now + 0.2);
+    } catch (e) {
+      console.warn('Audio notice tone error', e);
+    }
+  }
 }
 
 export const notificationAudio = new NotificationAudio();

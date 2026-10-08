@@ -44,6 +44,7 @@ import { DocumentPreScreenModal } from './components/DocumentPreScreenModal';
 import { isActionRequired, isPendingStatement } from './utils/actionItemUtils';
 import { TeamActivityDrawer } from './components/TeamActivityDrawer';
 import { UserManualModal } from './components/UserManualModal';
+import { AutonomousAgentBanner } from './components/AutonomousAgentBanner';
 import { exportApplicationsToCsv } from './utils/exportCsv';
 import {
   getStoredAuthSession,
@@ -69,9 +70,11 @@ const DEFAULT_AUTOMATION_CONFIG: AutomationConfig = {
   scheduleTime: '08:30',
   timezone: 'Asia/Kuala_Lumpur',
   intervalHours: 24,
+  autonomousIntervalMinutes: 15,
   autoScanGmail: true,
   autoSyncGoogleSheet: true,
   autoSendTelegram: true,
+  autoProgressEvaluation: true,
   alertOnCriticalOnly: false,
   telegram: {
     botToken: '',
@@ -532,12 +535,40 @@ export default function App() {
     }
   }, [applications, authSession?.email]);
 
-  // Save sheetConfig to localStorage
+  // Register active OAuth session with backend autonomous daemon
+  const syncSessionToServer = (session: UserAuthSession | null) => {
+    if (!session?.accessToken) return;
+    fetch('/api/automation/session', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        accessToken: session.accessToken,
+        email: session.email,
+        name: session.name,
+        picture: session.picture,
+        expiresAt: session.expiresAt,
+      }),
+    }).catch((err) => console.warn('Failed to register session with server:', err));
+  };
+
+  // Save sheetConfig to localStorage and register with backend autonomous daemon
   const handleSaveSheetConfig = (newConfig: SheetSyncConfig) => {
     setSheetConfig(newConfig);
     try {
       localStorage.setItem(SHEET_CONFIG_KEY, JSON.stringify(newConfig));
     } catch (e) {}
+
+    // Register with backend autonomous daemon
+    fetch('/api/automation/sheet-config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        spreadsheetId: newConfig.spreadsheetId,
+        sheetName: newConfig.sheetName,
+        spreadsheetUrl: newConfig.spreadsheetUrl,
+        autoSync: newConfig.autoSync,
+      }),
+    }).catch((err) => console.warn('Failed to register sheet config with server:', err));
   };
 
   // Save automationConfig to localStorage and sync to server
@@ -596,16 +627,20 @@ export default function App() {
   };
 
   // Automated Pipeline Execution Routine (Gmail Scan -> Sheet Sync -> Telegram Broadcast)
-  const handleRunAutomationNow = async () => {
+  const handleRunAutomationNow = async (isManualClick: any = true) => {
+    // When invoked via onClick event or default, it is an explicit manual click
+    const isManual = isManualClick === true || (typeof isManualClick === 'object' && isManualClick !== null);
     if (isRunningAutomation) return;
     setIsRunningAutomation(true);
 
-    handleAddAutomationLog({
-      timestamp: new Date().toISOString(),
-      type: 'SYSTEM',
-      status: 'INFO',
-      message: 'Morning Automation Pipeline cycle initiated.',
-    });
+    if (isManual) {
+      handleAddAutomationLog({
+        timestamp: new Date().toISOString(),
+        type: 'SYSTEM',
+        status: 'INFO',
+        message: 'On-demand pipeline execution triggered by user.',
+      });
+    }
 
     try {
       const data = await safeFetchJson<any>('/api/automation/run', {
@@ -617,14 +652,17 @@ export default function App() {
         body: JSON.stringify({
           spreadsheetId: sheetConfig?.spreadsheetId,
           sheetName: sheetConfig?.sheetName || 'Active CoC Applications',
+          spreadsheetUrl: sheetConfig?.spreadsheetUrl,
           applications: applications,
-          userEmail: authSession?.email || 'team-member',
+          userEmail: authSession?.email || 'team-member@cytron.io',
           telegramConfig: automationConfig.telegram,
           scanQuery: 'from:sirim.my OR subject:ecomm OR subject:sqas OR subject:sirim',
+          isManualClick: isManual,
+          triggerSource: isManual ? 'MANUAL_CLICK' : 'AUTONOMOUS_CYCLE',
           options: {
             autoScanGmail: automationConfig.autoScanGmail && Boolean(authSession?.accessToken),
             autoSyncSheet: automationConfig.autoSyncGoogleSheet && Boolean(sheetConfig?.spreadsheetId),
-            autoSendTelegram: automationConfig.autoSendTelegram && Boolean(automationConfig.telegram?.botToken && automationConfig.telegram?.chatId),
+            autoSendTelegram: isManual && automationConfig.autoSendTelegram && Boolean(automationConfig.telegram?.botToken && automationConfig.telegram?.chatId),
             scanQuery: 'from:sirim.my OR subject:ecomm OR subject:sqas OR subject:sirim',
           },
         }),
@@ -665,17 +703,29 @@ export default function App() {
           ...automationConfig,
           lastRunAt: new Date().toISOString(),
           lastRunStatus: 'SUCCESS',
-          lastRunSummary: `Scanned ${data.scanResult?.threadsFound || 0} emails, updated ${data.applications?.length || applications.length} apps, Telegram dispatched.`,
+          lastRunSummary: `Scanned ${data.scanResult?.threadsFound || 0} emails, updated ${data.applications?.length || applications.length} apps, ${data.telegramSent ? 'Telegram dispatched' : 'Sheet synced'}.`,
           logs: combined,
         });
       }
 
-      setSyncFeedback({
-        message: `Automation Cycle Complete: Scanned Gmail, updated Sheet & dispatched Telegram briefing!`,
-        type: 'success',
-      });
-      notificationAudio.playSuccessTone();
-      confetti({ particleCount: 50, spread: 70 });
+      if (isManual) {
+        setSyncFeedback({
+          message: data.telegramSent
+            ? `Pipeline Complete: Scanned Gmail, updated Google Sheet & delivered Telegram briefing!`
+            : `Pipeline Complete: Scanned Gmail & updated Google Sheet successfully!`,
+          type: 'success',
+        });
+        notificationAudio.playSuccessTone();
+        confetti({ particleCount: 50, spread: 70 });
+      } else {
+        if (data.newEmailsDetected > 0) {
+          setSyncFeedback({
+            message: `Autonomous Agent detected ${data.newEmailsDetected} new SIRIM updates & synced to Google Sheet.`,
+            type: 'success',
+          });
+          notificationAudio.playNoticeTone();
+        }
+      }
     } catch (err: any) {
       console.error('Automation run error:', err);
       handleAddAutomationLog({
@@ -693,69 +743,63 @@ export default function App() {
         lastRunSummary: `Failed: ${err.message}`,
       });
 
-      setSyncFeedback({
-        message: `Automation error: ${err.message}`,
-        type: 'error',
-      });
+      if (isManual) {
+        setSyncFeedback({
+          message: `Automation error: ${err.message}`,
+          type: 'error',
+        });
+      }
     } finally {
       setIsRunningAutomation(false);
-      setTimeout(() => setSyncFeedback(null), 8000);
+      setTimeout(() => setSyncFeedback(null), 6000);
     }
   };
 
-  // Background Auto-Scheduler Timer (Checks every 30 seconds for scheduled morning trigger)
+  // Background Autonomous Sync: Periodically poll server automation config (every 30 seconds)
+  // to keep agent state, logs, and run timestamps up to date without triggering redundant runs.
   useEffect(() => {
-    if (!automationConfig.enabled) return;
+    const fetchStatus = () => {
+      fetch('/api/automation/config')
+        .then((res) => (res.ok ? res.json() : null))
+        .then((serverConfig) => {
+          if (serverConfig) {
+            setAutomationConfig((prev) => ({
+              ...prev,
+              ...serverConfig,
+              telegram: {
+                ...prev.telegram,
+                ...(serverConfig.telegram || {}),
+                botToken: prev.telegram?.botToken || serverConfig.telegram?.botToken || '',
+                chatId: prev.telegram?.chatId || serverConfig.telegram?.chatId || '',
+                topicId: prev.telegram?.topicId || serverConfig.telegram?.topicId || '',
+              },
+            }));
+          }
+        })
+        .catch(() => {});
+    };
 
-    const interval = setInterval(() => {
-      const now = new Date();
-      const tz = automationConfig.timezone || 'Asia/Kuala_Lumpur';
-
-      // Format current time HH:MM in Asia/Kuala_Lumpur (MYT)
-      const currentTimeStr = new Intl.DateTimeFormat('en-GB', {
-        timeZone: tz,
-        hour: '2-digit',
-        minute: '2-digit',
-        hour12: false,
-      }).format(now);
-
-      // Format current date in Asia/Kuala_Lumpur (YYYY-MM-DD)
-      const currentDateStr = new Intl.DateTimeFormat('en-CA', {
-        timeZone: tz,
-        year: 'numeric',
-        month: '2-digit',
-        day: '2-digit',
-      }).format(now);
-
-      let lastRunDateStr = null;
-      if (automationConfig.lastRunAt) {
-        try {
-          lastRunDateStr = new Intl.DateTimeFormat('en-CA', {
-            timeZone: tz,
-            year: 'numeric',
-            month: '2-digit',
-            day: '2-digit',
-          }).format(new Date(automationConfig.lastRunAt));
-        } catch (e) {}
-      }
-
-      const isAlreadyRunToday = lastRunDateStr === currentDateStr;
-
-      const hasConfiguredService =
-        (automationConfig.autoScanGmail && Boolean(authSession?.accessToken)) ||
-        (automationConfig.autoSyncGoogleSheet && Boolean(sheetConfig?.spreadsheetId)) ||
-        (automationConfig.autoSendTelegram && Boolean(automationConfig.telegram?.botToken && automationConfig.telegram?.chatId));
-
-      // Check if scheduled time has arrived or passed today and a service is configured
-      if (!isAlreadyRunToday && !isRunningAutomation && hasConfiguredService && currentTimeStr >= automationConfig.scheduleTime) {
-        console.log(`[Client Scheduler] Triggering morning automation for ${currentDateStr} at ${currentTimeStr} MYT (Scheduled: ${automationConfig.scheduleTime})`);
-        handleRunAutomationNow();
-      }
-    }, 30000);
-
+    const interval = setInterval(fetchStatus, 30000);
     return () => clearInterval(interval);
-  }, [automationConfig, isRunningAutomation, applications, sheetConfig, authSession]);
+  }, []);
 
+  // Keep backend credentials fresh on session change
+  useEffect(() => {
+    if (authSession?.accessToken) {
+      syncSessionToServer(authSession);
+    }
+  }, [authSession?.accessToken]);
+
+  // Keep backend sheet config registered on mount
+  useEffect(() => {
+    if (sheetConfig?.spreadsheetId) {
+      fetch('/api/automation/sheet-config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(sheetConfig),
+      }).catch(() => {});
+    }
+  }, [sheetConfig?.spreadsheetId]);
 
   // Google OAuth Client setup
   const handleConnectGoogle = async () => {
@@ -763,6 +807,7 @@ export default function App() {
       const session = await googleSignIn();
       if (session) {
         setAuthSession(session);
+        syncSessionToServer(session);
         notificationAudio.playSuccessTone();
       }
     } catch (error) {
@@ -1290,6 +1335,18 @@ export default function App() {
             )}
           </div>
         )}
+
+        {/* Autonomous Agent Sentinel Banner */}
+        <AutonomousAgentBanner
+          automationConfig={automationConfig}
+          sheetConfig={sheetConfig}
+          authSession={authSession}
+          isRunningAutomation={isRunningAutomation}
+          onOpenAutomationModal={() => setIsAutomationModalOpen(true)}
+          onOpenSheetModal={() => setIsSheetModalOpen(true)}
+          onConnectGoogle={handleConnectGoogle}
+          onRunNow={() => handleRunAutomationNow(false)}
+        />
 
         {/* Stats & KPI Highlights (rendered only when active applications exist) */}
         {applications.length > 0 && (
