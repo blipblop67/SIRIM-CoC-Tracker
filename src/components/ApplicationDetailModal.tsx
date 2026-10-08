@@ -321,9 +321,13 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({
   const currentStageIndex = getStageIndex(application.status);
 
   // Action toggle handler
-  const handleToggleAction = (actionId: string) => {
+  const handleToggleAction = (actionId: string, force = false) => {
     const updatedActions = application.actionItems.map((a) => {
       if (a.id === actionId) {
+        if (!force && isPendingStatement(a) && !a.isCompleted) {
+          // Do not allow toggling pending third-party items like internal tasks
+          return a;
+        }
         const nextState = !a.isCompleted;
         if (nextState) {
           notificationAudio.playSuccessTone();
@@ -1180,17 +1184,31 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({
                         }`}
                       >
                         <div className="flex items-start gap-3">
-                          <input
-                            type="checkbox"
-                            checked={action.isCompleted}
-                            onChange={() => handleToggleAction(action.id)}
-                            className={`mt-1 h-4 w-4 rounded cursor-pointer ${
-                              isStmt
-                                ? 'border-purple-300 text-purple-600 focus:ring-purple-500'
-                                : 'border-slate-300 text-blue-600 focus:ring-blue-500'
-                            }`}
-                            title={isStmt ? "Mark statement as resolved/received" : "Mark action as completed"}
-                          />
+                          {isStmt ? (
+                            action.isCompleted ? (
+                              <div
+                                className="mt-0.5 w-5 h-5 rounded-md bg-emerald-100 text-emerald-700 flex items-center justify-center shrink-0"
+                                title="Resolved / Document received"
+                              >
+                                <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
+                              </div>
+                            ) : (
+                              <div
+                                className="mt-0.5 w-5 h-5 rounded-md bg-purple-100 text-purple-700 border border-purple-200 flex items-center justify-center shrink-0 cursor-default"
+                                title={`Awaiting response from ${labelInfo.shortLabel} — Cannot be ticked manually`}
+                              >
+                                <Clock className="w-3.5 h-3.5 text-purple-600" />
+                              </div>
+                            )
+                          ) : (
+                            <input
+                              type="checkbox"
+                              checked={action.isCompleted}
+                              onChange={() => handleToggleAction(action.id)}
+                              className="mt-1 h-4 w-4 rounded cursor-pointer border-slate-300 text-blue-600 focus:ring-blue-500"
+                              title="Mark internal action as completed"
+                            />
+                          )}
                           <div className="flex-1 space-y-1">
                             <div className="flex flex-wrap items-center justify-between gap-2">
                               <h5
@@ -1240,6 +1258,13 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({
                               {action.description}
                             </p>
 
+                            {isStmt && !action.isCompleted && (
+                              <div className="flex items-center gap-1.5 text-[11px] text-purple-800 bg-purple-100/60 border border-purple-200/90 rounded-md px-2.5 py-1 mt-1 font-medium">
+                                <Clock className="w-3.5 h-3.5 text-purple-600 shrink-0" />
+                                <span>Awaiting external party ({labelInfo.shortLabel}) · Tick box disabled (auto-resolves via email or report)</span>
+                              </div>
+                            )}
+
                             {action.emailSourceSnippet && (
                               <div className="bg-slate-50 border-l-2 border-amber-400 p-2 text-[11px] text-slate-600 rounded-r mt-1 italic">
                                 "{action.emailSourceSnippet}"
@@ -1281,16 +1306,41 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({
                               )}
 
                             {!action.isCompleted && (
-                              <button
-                                onClick={() => {
-                                  setActiveTab('ai-reply');
-                                  setReplyCustomNotes(action.title);
-                                }}
-                                className="text-blue-600 hover:text-blue-800 font-semibold flex items-center gap-1"
-                              >
-                                <Sparkles className="w-3 h-3" />
-                                <span>Draft Reply for this</span>
-                              </button>
+                              <div className="flex items-center gap-2">
+                                {isStmt ? (
+                                  <>
+                                    <button
+                                      onClick={() => {
+                                        setActiveTab('ai-reply');
+                                        setReplyCustomNotes(`Follow-up / Chaser regarding: ${action.title}`);
+                                      }}
+                                      className="text-purple-700 hover:text-purple-900 font-semibold flex items-center gap-1 text-xs bg-purple-50 hover:bg-purple-100 px-2.5 py-1 rounded-md border border-purple-200 transition-colors"
+                                      title="Draft an email chaser to the third party"
+                                    >
+                                      <Send className="w-3 h-3 text-purple-600" />
+                                      <span>Draft Chaser / Follow-up</span>
+                                    </button>
+                                    <button
+                                      onClick={() => handleToggleAction(action.id, true)}
+                                      className="text-[10px] text-slate-400 hover:text-slate-700 underline transition-colors"
+                                      title="Record that document was received offline outside of email"
+                                    >
+                                      Record offline receipt
+                                    </button>
+                                  </>
+                                ) : (
+                                  <button
+                                    onClick={() => {
+                                      setActiveTab('ai-reply');
+                                      setReplyCustomNotes(action.title);
+                                    }}
+                                    className="text-blue-600 hover:text-blue-800 font-semibold flex items-center gap-1 text-xs"
+                                  >
+                                    <Sparkles className="w-3 h-3" />
+                                    <span>Draft Reply for this</span>
+                                  </button>
+                                )}
+                              </div>
                             )}
                           </div>
                         </div>

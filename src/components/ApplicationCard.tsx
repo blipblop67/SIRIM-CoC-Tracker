@@ -213,13 +213,22 @@ export const ApplicationCard: React.FC<ApplicationCardProps> = ({
                     onClick={(e) => e.stopPropagation()}
                     className="flex items-start gap-2 bg-white border border-slate-200/80 rounded-md p-2 shadow-2xs hover:border-slate-300 transition-colors"
                   >
-                    <input
-                      type="checkbox"
-                      checked={action.isCompleted}
-                      onChange={() => onToggleActionItem(application.id, action.id)}
-                      className="mt-0.5 h-3.5 w-3.5 rounded border-slate-300 text-slate-900 focus:ring-slate-900 cursor-pointer"
-                      title={isStmt ? 'Mark statement as resolved' : 'Mark action as completed'}
-                    />
+                    {isStmt ? (
+                      <div
+                        className="mt-0.5 p-0.5 rounded bg-purple-50 text-purple-600 border border-purple-200 shrink-0"
+                        title={`Awaiting third party (${labelInfo.shortLabel}) — Cannot be ticked manually`}
+                      >
+                        <Clock className="w-3 h-3" />
+                      </div>
+                    ) : (
+                      <input
+                        type="checkbox"
+                        checked={action.isCompleted}
+                        onChange={() => onToggleActionItem(application.id, action.id)}
+                        className="mt-0.5 h-3.5 w-3.5 rounded border-slate-300 text-slate-900 focus:ring-slate-900 cursor-pointer"
+                        title="Mark action as completed"
+                      />
+                    )}
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-1.5 flex-wrap mb-0.5 text-[10px]">
                         <span className="font-semibold text-slate-700">

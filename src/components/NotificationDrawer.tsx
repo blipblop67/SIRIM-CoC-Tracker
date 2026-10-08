@@ -211,17 +211,22 @@ export const NotificationDrawer: React.FC<NotificationDrawerProps> = ({
                     }`}
                   >
                     <div className="flex items-start gap-3">
-                      <input
-                        type="checkbox"
-                        checked={action.isCompleted}
-                        onChange={() => handleActionCheck(app.id, action.id)}
-                        className={`mt-1 h-4 w-4 rounded cursor-pointer ${
-                          isStmt
-                            ? 'border-purple-300 text-purple-600 focus:ring-purple-500'
-                            : 'border-slate-300 text-blue-600 focus:ring-blue-500'
-                        }`}
-                        title={isStmt ? "Mark statement as resolved (e.g. report received)" : "Mark action as completed"}
-                      />
+                      {isStmt ? (
+                        <div
+                          className="mt-1 flex items-center justify-center w-4 h-4 rounded bg-purple-100 text-purple-700 border border-purple-200 shrink-0 cursor-default"
+                          title={`Awaiting external response from ${labelInfo.shortLabel} — Cannot be ticked manually`}
+                        >
+                          <Clock className="w-2.5 h-2.5" />
+                        </div>
+                      ) : (
+                        <input
+                          type="checkbox"
+                          checked={action.isCompleted}
+                          onChange={() => handleActionCheck(app.id, action.id)}
+                          className="mt-1 h-4 w-4 rounded cursor-pointer border-slate-300 text-blue-600 focus:ring-blue-500"
+                          title="Mark action as completed"
+                        />
+                      )}
                       <div className="flex-1 min-w-0 space-y-1.5">
                         <div className="flex items-start justify-between gap-2">
                           <h5 className={`text-xs font-bold leading-snug ${isStmt ? 'text-purple-950' : 'text-slate-900'}`}>

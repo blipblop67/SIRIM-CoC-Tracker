@@ -431,6 +431,13 @@ export const UserManualModal: React.FC<UserManualModalProps> = ({
                   </div>
 
                   <div className="p-3 rounded-xl border border-slate-200">
+                    <h4 className="font-semibold text-slate-900">Why is there no tick checkbox for pending actions waiting on third parties?</h4>
+                    <p className="text-slate-600 text-[11px] mt-1">
+                      Checkboxes are strictly reserved for <strong>internal team tasks</strong> (e.g. paying SIRIM processing fees, uploading spec sheets). When an item is pending due to an external third party (SIRIM officer evaluation, supplier docs, lab test report), you cannot manually tick it off because your team is waiting on them. Instead, it displays a pending clock indicator and resolves automatically when their incoming email or report is parsed, or you can click <strong>Draft Chaser / Follow-up</strong> to nudge them.
+                    </p>
+                  </div>
+
+                  <div className="p-3 rounded-xl border border-slate-200">
                     <h4 className="font-semibold text-slate-900">How do I run this on our Raspberry Pi?</h4>
                     <p className="text-slate-600 text-[11px] mt-1">
                       Refer to the full instructions in <code className="bg-slate-100 px-1 py-0.5 rounded font-mono text-[10px]">README.md</code>. Run <code className="bg-slate-100 px-1 py-0.5 rounded font-mono text-[10px]">pm2 start ecosystem.config.cjs</code> to run 24/7 on boot. Access from any laptop on your local Wi-Fi via <code className="bg-slate-100 px-1 py-0.5 rounded font-mono text-[10px]">http://raspberrypi.local:3000</code>.

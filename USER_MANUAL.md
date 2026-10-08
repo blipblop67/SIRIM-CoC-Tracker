@@ -187,6 +187,9 @@ Maintain an executive register spreadsheet for management and external auditors:
 cp -r ./data ~/sirim_backup_$(date +%Y%m%d)
 ```
 
+#### Q: Why is there no checkbox to tick on actions that are pending because of a third party?
+**A:** Checkboxes are intentionally limited to **internal team actions** (tasks your team controls, such as paying processing fees or submitting test reports). When an item is pending due to an external third party (e.g. SIRIM officer evaluation, supplier declaration, accredited lab report), your team is waiting on them. Ticking a box would falsely mark an unresolved external dependency as complete. These items display a distinct pending clock indicator and resolve automatically when incoming emails or reports arrive, or you can use the **Draft Chaser / Follow-up** button to send an email follow-up.
+
 #### Q: What if a SIRIM email format changes?
 **A:** The parser utilizes multi-pattern regex combined with semantic extraction that adapts to different SIRIM QAS branches (Shah Alam, Bukit Jalil), e-ComM automated notifications, and officer direct replies.
 

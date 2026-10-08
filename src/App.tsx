@@ -853,6 +853,13 @@ export default function App() {
 
   // Toggle Action Item Checkbox
   const handleToggleActionItem = (appId: string, actionItemId: string) => {
+    // Guard: Prevent ticking of pending third-party statements
+    const targetApp = applications.find((a) => a.id === appId);
+    const targetAct = targetApp?.actionItems.find((act) => act.id === actionItemId);
+    if (targetAct && isPendingStatement(targetAct) && !targetAct.isCompleted) {
+      return;
+    }
+
     const authorEmail = authSession?.email || 'rupa@cytron.io';
     const nowStr = new Date().toISOString();
     let toggledItemTitle = '';
