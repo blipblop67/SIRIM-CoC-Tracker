@@ -16,6 +16,7 @@ import {
   ArrowRight,
   CheckCircle2,
   Trash2,
+  BookOpen,
 } from 'lucide-react';
 import confetti from 'canvas-confetti';
 import {
@@ -42,6 +43,7 @@ import { AutomationModal } from './components/AutomationModal';
 import { DocumentPreScreenModal } from './components/DocumentPreScreenModal';
 import { isActionRequired, isPendingStatement } from './utils/actionItemUtils';
 import { TeamActivityDrawer } from './components/TeamActivityDrawer';
+import { UserManualModal } from './components/UserManualModal';
 import { exportApplicationsToCsv } from './utils/exportCsv';
 import {
   getStoredAuthSession,
@@ -321,6 +323,7 @@ export default function App() {
   const [isAutomationModalOpen, setIsAutomationModalOpen] = useState(false);
   const [isGlobalPreScreenOpen, setIsGlobalPreScreenOpen] = useState(false);
   const [isActivityDrawerOpen, setIsActivityDrawerOpen] = useState(false);
+  const [isUserManualOpen, setIsUserManualOpen] = useState(false);
 
   // Multi-user collaborative presence & audit log state
   const [activeUsers, setActiveUsers] = useState<UserPresence[]>([]);
@@ -1229,6 +1232,7 @@ export default function App() {
         applicationsCount={applications.length}
         activeUsers={activeUsers}
         onOpenActivityDrawer={() => setIsActivityDrawerOpen(true)}
+        onOpenUserManual={() => setIsUserManualOpen(true)}
         onOpenSheetModal={() => setIsSheetModalOpen(true)}
         onOpenGmailScanner={() => setIsGmailScannerOpen(true)}
         onOpenNewAppModal={() => setIsNewAppModalOpen(true)}
@@ -1325,7 +1329,7 @@ export default function App() {
               </p>
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 pt-2">
+            <div className="grid grid-cols-1 sm:grid-cols-4 gap-2.5 pt-2">
               <button
                 onClick={() => {
                   if (!authSession?.isAuthenticated) {
@@ -1360,6 +1364,17 @@ export default function App() {
                 <span>Link Sheet</span>
                 <span className="text-[10px] text-slate-400 font-normal">
                   {sheetConfig?.spreadsheetId ? 'Connected' : 'Google Sheet'}
+                </span>
+              </button>
+
+              <button
+                onClick={() => setIsUserManualOpen(true)}
+                className="flex flex-col items-center justify-center gap-1.5 p-3.5 rounded-lg border border-sky-200 bg-sky-50/50 hover:bg-sky-100/70 hover:border-sky-300 text-sky-900 font-semibold text-xs transition-all shadow-2xs"
+              >
+                <BookOpen className="w-4 h-4 text-sky-600" />
+                <span>User Guide</span>
+                <span className="text-[10px] text-sky-600 font-normal">
+                  Getting Started
                 </span>
               </button>
             </div>
@@ -1559,6 +1574,17 @@ export default function App() {
               });
             }
           }}
+        />
+      )}
+      {/* User Manual & Getting Started Modal */}
+      {isUserManualOpen && (
+        <UserManualModal
+          isOpen={isUserManualOpen}
+          onClose={() => setIsUserManualOpen(false)}
+          onOpenGmailScan={() => setIsGmailScannerOpen(true)}
+          onOpenAutomation={() => setIsAutomationModalOpen(true)}
+          onOpenPreScreen={() => setIsGlobalPreScreenOpen(true)}
+          onOpenNewApp={() => setIsNewAppModalOpen(true)}
         />
       )}
     </div>

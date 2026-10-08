@@ -18,6 +18,7 @@ import {
   Activity,
   MoreHorizontal,
   ChevronDown,
+  BookOpen,
 } from 'lucide-react';
 import { AutomationConfig, SheetSyncConfig, UserAuthSession, UserPresence } from '../types';
 
@@ -38,6 +39,7 @@ interface HeaderProps {
   onOpenNotificationDrawer: () => void;
   onOpenAutomationModal: () => void;
   onOpenActivityDrawer?: () => void;
+  onOpenUserManual?: () => void;
   onConnectGoogle: () => void;
   onDisconnectGoogle: () => void;
   onManualSyncSheet: () => void;
@@ -64,6 +66,7 @@ export const Header: React.FC<HeaderProps> = ({
   onOpenNotificationDrawer,
   onOpenAutomationModal,
   onOpenActivityDrawer,
+  onOpenUserManual,
   onConnectGoogle,
   onDisconnectGoogle,
   onManualSyncSheet,
@@ -232,6 +235,17 @@ export const Header: React.FC<HeaderProps> = ({
           </button>
         )}
 
+        {/* User Manual & Getting Started Guide */}
+        {onOpenUserManual && (
+          <button
+            onClick={onOpenUserManual}
+            className="p-1.5 rounded-lg text-slate-500 hover:text-slate-900 hover:bg-slate-100 transition-colors"
+            title="User Manual & Getting Started Guide"
+          >
+            <BookOpen className="w-4 h-4 text-sky-600" />
+          </button>
+        )}
+
         {/* Notifications Bell */}
         <button
           onClick={onOpenNotificationDrawer}
@@ -349,6 +363,18 @@ export const Header: React.FC<HeaderProps> = ({
                   <Zap className="w-3.5 h-3.5 text-amber-500" />
                   <span>Automation & Telegram Bot</span>
                 </button>
+                {onOpenUserManual && (
+                  <button
+                    onClick={() => {
+                      setIsMoreOpen(false);
+                      onOpenUserManual();
+                    }}
+                    className="w-full text-left px-3.5 py-1.5 hover:bg-slate-50 flex items-center gap-2 font-medium text-slate-700"
+                  >
+                    <BookOpen className="w-3.5 h-3.5 text-sky-600" />
+                    <span>User Manual & Guide</span>
+                  </button>
+                )}
               </div>
 
               <div className="py-1">
