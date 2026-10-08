@@ -10,17 +10,13 @@ import {
   Mail,
   ExternalLink,
   Trash2,
-  Building2,
 } from 'lucide-react';
 import { SirimApplication } from '../types';
 import {
   getStatusBadgeInfo,
-  getSchemeColor,
   calculateDeadlineInfo,
   formatDate,
   getGmailThreadUrl,
-  getSupplierStatusBadgeInfo,
-  getAssigneeBadgeInfo,
 } from '../utils/formatters';
 import { separateActionItems, getActionLabelInfo } from '../utils/actionItemUtils';
 
@@ -49,20 +45,20 @@ export const ApplicationTable: React.FC<ApplicationTableProps> = ({
   };
 
   return (
-    <div className="bg-white border border-slate-200 rounded-xl shadow-xs overflow-hidden">
+    <div className="bg-white border border-slate-200/80 rounded-xl shadow-2xs overflow-hidden">
       <div className="overflow-x-auto">
-        <table className="w-full text-left border-collapse">
+        <table className="w-full text-left border-collapse text-xs">
           <thead>
-            <tr className="bg-slate-900 text-white text-xs font-semibold uppercase tracking-wider">
-              <th className="py-3 px-4">Ref No / Status</th>
-              <th className="py-3 px-4">Product & Model</th>
-              <th className="py-3 px-4">Email Thread</th>
-              <th className="py-3 px-4">Scheme</th>
-              <th className="py-3 px-4">Officer & Supplier</th>
-              <th className="py-3 px-4">Actions & Pending Statements</th>
-              <th className="py-3 px-4">Target SLA</th>
-              <th className="py-3 px-4">Certificate / Fee</th>
-              <th className="py-3 px-4 text-right">Actions</th>
+            <tr className="bg-slate-50/80 border-b border-slate-200/80 text-slate-500 font-semibold text-[11px] uppercase tracking-wider">
+              <th className="py-3 px-4 font-semibold">Ref / Status</th>
+              <th className="py-3 px-4 font-semibold">Product & Model</th>
+              <th className="py-3 px-4 font-semibold">Email Thread</th>
+              <th className="py-3 px-4 font-semibold">Scheme</th>
+              <th className="py-3 px-4 font-semibold">Officer</th>
+              <th className="py-3 px-4 font-semibold">Active Requirements</th>
+              <th className="py-3 px-4 font-semibold">Target SLA</th>
+              <th className="py-3 px-4 font-semibold">Certificate / Fee</th>
+              <th className="py-3 px-4 font-semibold text-right">Actions</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-100 text-xs">
@@ -72,22 +68,23 @@ export const ApplicationTable: React.FC<ApplicationTableProps> = ({
               const incompleteItems = app.actionItems.filter((a) => !a.isCompleted);
               const { activeActions, pendingStatements } = separateActionItems(incompleteItems);
               const hasCritical = activeActions.some((a) => a.priority === 'CRITICAL');
-              const emailSubject = app.emailSubject || app.emailThreads?.[app.emailThreads.length - 1]?.subject || `Ref: ${app.applicationRef}`;
+              const emailSubject =
+                app.emailSubject || app.emailThreads?.[app.emailThreads.length - 1]?.subject || `Ref: ${app.applicationRef}`;
               const gmailUrl = getGmailThreadUrl(app);
 
               return (
                 <tr
                   key={app.id}
                   onClick={() => onSelect(app)}
-                  className="hover:bg-slate-50/50 cursor-pointer transition-colors group"
+                  className="hover:bg-slate-50/60 cursor-pointer transition-colors group"
                 >
                   {/* 1. Ref & Status */}
                   <td className="py-3 px-4 space-y-1">
-                    <div className="flex items-center gap-1.5 font-mono font-bold text-slate-900 group-hover:text-indigo-600 transition-colors">
+                    <div className="flex items-center gap-1.5 font-mono font-semibold text-slate-800 group-hover:text-indigo-600 transition-colors">
                       <span>{app.applicationRef}</span>
                       <button
                         onClick={(e) => handleCopy(e, app.id, app.applicationRef)}
-                        className="text-slate-400 hover:text-indigo-600 opacity-0 group-hover:opacity-100 transition-opacity"
+                        className="text-slate-400 hover:text-slate-700 opacity-0 group-hover:opacity-100 transition-opacity p-0.5"
                         title="Copy Reference"
                       >
                         {copiedId === app.id ? (
@@ -97,32 +94,31 @@ export const ApplicationTable: React.FC<ApplicationTableProps> = ({
                         )}
                       </button>
                     </div>
-                    <div>
+                    <div className="flex items-center gap-1.5">
                       <span
-                        className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-semibold border ${statusInfo.bg} ${statusInfo.text} ${statusInfo.border}`}
-                      >
-                        <span className="w-1.5 h-1.5 rounded-full bg-current" />
-                        {statusInfo.label}
-                      </span>
+                        className={`w-1.5 h-1.5 rounded-full ${
+                          app.status === 'APPROVED'
+                            ? 'bg-emerald-500'
+                            : app.status === 'RFI_ACTION_REQUIRED'
+                            ? 'bg-rose-500'
+                            : app.status === 'SAMPLE_REQUESTED' || app.status === 'PAYMENT_PENDING'
+                            ? 'bg-amber-500'
+                            : 'bg-indigo-500'
+                        }`}
+                      />
+                      <span className="text-[11px] font-medium text-slate-700">{statusInfo.label}</span>
                     </div>
                   </td>
 
                   {/* 2. Product & Model */}
                   <td className="py-3 px-4">
-                    <div className="font-semibold text-slate-900 line-clamp-1 group-hover:text-blue-600 transition-colors">
+                    <div className="font-semibold text-slate-900 line-clamp-1 group-hover:text-indigo-600 transition-colors">
                       {app.productName}
                     </div>
                     <div className="text-slate-500 font-mono text-[11px] mt-0.5">
-                      {app.modelNumber} • <span className="font-sans font-medium">{app.brand}</span>
+                      {app.modelNumber} <span className="text-slate-300 font-sans">·</span>{' '}
+                      <span className="font-sans font-medium text-slate-600">{app.brand}</span>
                     </div>
-                    {app.lastModifiedBy && (
-                      <div className="text-[10px] text-slate-400 mt-0.5 flex items-center gap-1">
-                        <span>Updated by</span>
-                        <span className="font-medium text-slate-600">
-                          {app.lastModifiedBy === currentUserEmail ? 'You' : app.lastModifiedBy.split('@')[0]}
-                        </span>
-                      </div>
-                    )}
                   </td>
 
                   {/* 3. Email Thread & Link */}
@@ -131,168 +127,120 @@ export const ApplicationTable: React.FC<ApplicationTableProps> = ({
                       href={gmailUrl}
                       target="_blank"
                       rel="noreferrer"
-                      className="group/link flex items-start gap-1.5 text-sky-700 hover:text-sky-900"
+                      className="group/link flex items-start gap-1.5 text-slate-600 hover:text-slate-900"
                       title="Open thread in Gmail"
                     >
-                      <Mail className="w-3.5 h-3.5 mt-0.5 text-sky-500 shrink-0 group-hover/link:text-sky-700" />
+                      <Mail className="w-3.5 h-3.5 mt-0.5 text-slate-400 shrink-0 group-hover/link:text-slate-600" />
                       <div className="min-w-0">
                         <p className="text-[11px] font-medium line-clamp-1 group-hover/link:underline">
                           {emailSubject}
                         </p>
-                        <span className="inline-flex items-center gap-0.5 text-[10px] text-sky-600 font-semibold font-mono">
-                          Open Thread <ExternalLink className="w-2.5 h-2.5" />
+                        <span className="inline-flex items-center gap-0.5 text-[10px] text-slate-400 hover:text-slate-600">
+                          Open <ExternalLink className="w-2.5 h-2.5" />
                         </span>
                       </div>
                     </a>
                   </td>
 
                   {/* 4. Scheme */}
-                  <td className="py-3 px-4">
-                    <span
-                      className={`inline-flex items-center px-2 py-0.5 rounded text-[11px] font-medium border ${getSchemeColor(
-                        app.scheme
-                      )}`}
-                    >
-                      {app.scheme}
-                    </span>
+                  <td className="py-3 px-4 text-slate-600 whitespace-nowrap">
+                    {app.scheme.replace(' (MCMC/SIRIM)', '').replace(' (MS Standards)', '')}
                   </td>
 
-                  {/* 5. Officer & Supplier */}
-                  <td className="py-3 px-4 max-w-xs space-y-1.5">
-                    <div>
-                      <div className="font-medium text-slate-800">{app.officerName || 'SIRIM Officer Pending'}</div>
-                      {app.officerEmail && (
-                        <div className="text-slate-400 text-[11px] font-mono">{app.officerEmail}</div>
-                      )}
-                    </div>
-                    {(app.supplierName || (app.supplierStatus && app.supplierStatus !== 'NOT_INVOLVED')) && (
-                      <div className="flex items-center gap-1.5 text-[11px] bg-purple-50/70 text-purple-900 border border-purple-200/70 rounded px-1.5 py-0.5">
-                        <Building2 className="w-3 h-3 text-purple-600 shrink-0" />
-                        <span className="truncate font-medium">{app.supplierName || 'Hardware Supplier'}</span>
-                        {(() => {
-                          const sBadge = getSupplierStatusBadgeInfo(app.supplierStatus);
-                          if (!sBadge) return null;
-                          return (
-                            <span className="shrink-0 text-[10px] font-semibold text-purple-700 bg-purple-100/80 px-1 rounded">
-                              {sBadge.shortLabel}
-                            </span>
-                          );
-                        })()}
-                      </div>
-                    )}
+                  {/* 5. Officer */}
+                  <td className="py-3 px-4 text-slate-700 whitespace-nowrap">
+                    <span className="font-medium">{app.officerName || 'SIRIM Officer'}</span>
                   </td>
 
-                  {/* 6. Pending Actions & Statements */}
+                  {/* 6. Active Requirements */}
                   <td className="py-3 px-4 max-w-xs">
                     {incompleteItems.length > 0 ? (
-                      <div className="space-y-1">
-                        <div className="flex items-center gap-1.5 flex-wrap">
+                      <div className="space-y-0.5">
+                        <div className="flex items-center gap-1.5 text-[11px]">
                           {activeActions.length > 0 ? (
-                            <span
-                              className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-bold ${
-                                hasCritical
-                                  ? 'bg-rose-100 text-rose-800 border border-rose-200 animate-pulse'
-                                  : 'bg-amber-100 text-amber-800 border border-amber-300'
-                              }`}
-                            >
-                              <AlertTriangle className="w-3 h-3" />
-                              {activeActions.length} Action Required
+                            <span className="font-semibold text-rose-600 flex items-center gap-1">
+                              <AlertTriangle className="w-3 h-3 text-rose-500" />
+                              {activeActions.length} Action{activeActions.length === 1 ? '' : 's'}
                             </span>
                           ) : (
-                            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-bold bg-purple-100 text-purple-800 border border-purple-200">
-                              <Clock className="w-3 h-3 text-purple-600" />
-                              Pending Statement
+                            <span className="font-semibold text-slate-600 flex items-center gap-1">
+                              <Clock className="w-3 h-3 text-indigo-500" />
+                              {pendingStatements.length} Waiting
                             </span>
                           )}
-
-                          {activeActions.length > 0 && pendingStatements.length > 0 && (
-                            <span className="inline-flex items-center gap-0.5 px-1 py-0.2 rounded text-[9px] font-semibold bg-purple-50 text-purple-700 border border-purple-200">
-                              +{pendingStatements.length} waiting
-                            </span>
-                          )}
-
                           {(() => {
                             const primaryItem = activeActions[0] || pendingStatements[0];
                             const labelInfo = getActionLabelInfo(primaryItem);
                             return (
-                              <span className={`text-[10px] font-medium px-1 rounded border ${labelInfo.bg} ${labelInfo.text} ${labelInfo.border}`}>
-                                {labelInfo.shortLabel}
+                              <span className="text-[10px] text-slate-500">
+                                · {labelInfo.shortLabel}
                               </span>
                             );
                           })()}
                         </div>
-                        <p className="text-[11px] text-slate-700 line-clamp-1 font-medium">
+                        <p className="text-[11px] text-slate-600 line-clamp-1">
                           {(activeActions[0] || pendingStatements[0]).title}
                         </p>
                       </div>
                     ) : (
-                      <span className="text-emerald-700 font-medium text-[11px] flex items-center gap-1">
-                        <FileCheck className="w-3.5 h-3.5 text-emerald-600" />
+                      <span className="text-emerald-600 font-medium text-[11px] flex items-center gap-1">
+                        <FileCheck className="w-3.5 h-3.5" />
                         All Clear
                       </span>
                     )}
                   </td>
 
-                  {/* 6. Target SLA */}
-                  <td className="py-3 px-4 whitespace-nowrap">
+                  {/* 7. Target SLA */}
+                  <td className="py-3 px-4 whitespace-nowrap font-mono tabular-nums">
                     {app.targetDeadline ? (
-                      <div
-                        className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-semibold ${
+                      <span
+                        className={`inline-flex items-center gap-1 ${
                           deadline.isOverdue
-                            ? 'bg-rose-100 text-rose-700'
+                            ? 'text-rose-600 font-semibold'
                             : deadline.isDueSoon
-                            ? 'bg-amber-100 text-amber-800'
-                            : 'bg-slate-100 text-slate-700'
+                            ? 'text-amber-600 font-semibold'
+                            : 'text-slate-600'
                         }`}
                       >
                         <Clock className="w-3 h-3" />
-                        <span>{deadline.text}</span>
-                      </div>
+                        {deadline.text}
+                      </span>
                     ) : (
                       <span className="text-slate-400">-</span>
                     )}
                   </td>
 
-                  {/* 7. Certificate / Fee */}
+                  {/* 8. Certificate / Fee */}
                   <td className="py-3 px-4 whitespace-nowrap">
                     {app.certificateNo ? (
-                      <div className="font-mono text-[11px] font-bold text-emerald-700">
+                      <span className="font-mono text-[11px] font-semibold text-emerald-700">
                         {app.certificateNo}
-                      </div>
+                      </span>
                     ) : app.processingFeeRm ? (
-                      <div className="text-slate-700 font-medium">
+                      <span className="font-mono tabular-nums text-slate-700">
                         RM {app.processingFeeRm.toLocaleString()}
-                        <span
-                          className={`ml-1.5 text-[10px] px-1 py-0.2 rounded ${
-                            app.paymentStatus === 'PAID'
-                              ? 'bg-emerald-100 text-emerald-700'
-                              : 'bg-amber-100 text-amber-700 font-bold'
-                          }`}
-                        >
-                          {app.paymentStatus}
-                        </span>
-                      </div>
+                      </span>
                     ) : (
                       <span className="text-slate-400">-</span>
                     )}
                   </td>
 
-                  {/* 8. Actions */}
+                  {/* 9. Actions */}
                   <td className="py-3 px-4 text-right whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
-                    <div className="flex items-center justify-end gap-1.5">
+                    <div className="flex items-center justify-end gap-1">
                       {incompleteItems.length > 0 && (
                         <button
                           onClick={() => onQuickDraftReply(app)}
-                          className="px-2 py-1 rounded bg-indigo-50 text-indigo-700 hover:bg-indigo-100 border border-indigo-200 font-semibold flex items-center gap-1 transition-colors"
-                          title="Draft Official AI Reply"
+                          className="px-2 py-1 rounded text-slate-700 hover:text-slate-900 hover:bg-slate-100 font-medium flex items-center gap-1 transition-colors"
+                          title="Draft Reply"
                         >
-                          <Sparkles className="w-3 h-3" />
-                          <span>Reply</span>
+                          <Sparkles className="w-3 h-3 text-indigo-600" />
+                          <span>Draft</span>
                         </button>
                       )}
                       <button
                         onClick={() => onSelect(app)}
-                        className="p-1.5 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded transition-colors"
+                        className="p-1 text-slate-400 hover:text-slate-700 rounded transition-colors"
                         title="View Details"
                       >
                         <ChevronRight className="w-4 h-4" />
@@ -300,8 +248,8 @@ export const ApplicationTable: React.FC<ApplicationTableProps> = ({
                       {onDelete && (
                         <button
                           onClick={(e) => onDelete(app.id, e)}
-                          className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded transition-colors"
-                          title="Delete this application"
+                          className="p-1 text-slate-400 hover:text-rose-600 rounded transition-colors"
+                          title="Delete application"
                         >
                           <Trash2 className="w-3.5 h-3.5" />
                         </button>

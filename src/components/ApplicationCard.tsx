@@ -1,38 +1,33 @@
 import React from 'react';
 import {
-  Shield,
-  FileCheck,
-  AlertTriangle,
   Clock,
   User,
-  CheckCircle2,
   Copy,
   Check,
   ExternalLink,
-  MessageSquare,
   Sparkles,
-  Calendar,
-  Layers,
-  CircleDot,
-  FileSpreadsheet,
+  Mail,
+  Trash2,
+  Building2,
+  FileCheck,
+  AlertTriangle,
+  Bot,
 } from 'lucide-react';
-import { SirimApplication, ActionItem } from '../types';
+import { SirimApplication } from '../types';
 import {
   getStatusBadgeInfo,
   getPriorityBadge,
-  getSchemeColor,
   calculateDeadlineInfo,
   formatDate,
   getGmailThreadUrl,
   getSupplierStatusBadgeInfo,
-  getAssigneeBadgeInfo,
 } from '../utils/formatters';
-import { separateActionItems, getActionLabelInfo, isPendingStatement } from '../utils/actionItemUtils';
-import { Mail, Trash2, Building2 } from 'lucide-react';
+import { separateActionItems, getActionLabelInfo } from '../utils/actionItemUtils';
 
 interface ApplicationCardProps {
   application: SirimApplication;
   currentUserEmail?: string;
+  currentUserName?: string;
   onSelect: (app: SirimApplication) => void;
   onToggleActionItem: (appId: string, actionItemId: string) => void;
   onQuickDraftReply: (app: SirimApplication) => void;
@@ -75,78 +70,89 @@ export const ApplicationCard: React.FC<ApplicationCardProps> = ({
   return (
     <div
       onClick={() => onSelect(application)}
-      className={`group relative bg-white border rounded-xl shadow-xs hover:shadow-md transition-all cursor-pointer flex flex-col justify-between overflow-hidden ${
+      className={`group bg-white border rounded-xl p-4 sm:p-5 hover:border-slate-300 transition-all cursor-pointer flex flex-col justify-between shadow-2xs hover:shadow-xs relative ${
         criticalAction
-          ? 'border-rose-300 ring-1 ring-rose-400/20'
+          ? 'border-rose-300/80 ring-1 ring-rose-400/10'
           : application.status === 'APPROVED'
-          ? 'border-emerald-200 ring-1 ring-emerald-400/10'
-          : 'border-slate-200/90 hover:border-slate-300'
+          ? 'border-emerald-200/80 ring-1 ring-emerald-400/10'
+          : 'border-slate-200/80'
       }`}
     >
-      {/* Top Banner: Status & Scheme */}
-      <div className="p-4 pb-3 space-y-2.5">
-        <div className="flex items-start justify-between gap-2 flex-wrap">
-          <div className="flex items-center gap-1.5 flex-wrap">
-            {/* Scheme pill */}
-            <span
-              className={`inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-semibold border ${getSchemeColor(
-                application.scheme
-              )}`}
-            >
-              {application.scheme}
-            </span>
-
-            {/* My Task badge */}
-            {isAssignedToMe && (
-              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-bold bg-indigo-100 text-indigo-800 border border-indigo-300 shadow-2xs">
-                <User className="w-2.5 h-2.5" />
-                <span>Your Task</span>
-              </span>
-            )}
-          </div>
-
-          {/* Status Badge */}
-          <span
-            className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold border ${statusInfo.bg} ${statusInfo.text} ${statusInfo.border}`}
-          >
-            <span className="w-1.5 h-1.5 rounded-full bg-current" />
-            {statusInfo.label}
-          </span>
-        </div>
-
-        {/* Product & Model Header */}
-        <div>
-          <h3 className="text-base font-bold text-slate-900 group-hover:text-indigo-600 transition-colors line-clamp-1">
-            {application.productName}
-          </h3>
-          <div className="flex items-center gap-2 mt-0.5 text-xs text-slate-500 font-medium">
-            <span className="text-slate-700 font-mono font-semibold">{application.modelNumber}</span>
-            <span>•</span>
-            <span>{application.brand}</span>
-          </div>
-        </div>
-
-        {/* Ref No Pill & SLA Target */}
-        <div className="flex items-center justify-between gap-2 pt-1 border-t border-slate-100">
-          <div className="flex items-center gap-1.5 text-xs font-mono font-medium text-slate-600 bg-slate-100 px-2 py-0.5 rounded">
-            <span>{application.applicationRef}</span>
+      <div className="space-y-3">
+        {/* Top: Ref No & Status Dot */}
+        <div className="flex items-center justify-between text-xs">
+          <div className="flex items-center gap-1.5 font-mono text-slate-600">
+            <span className="font-semibold text-slate-800">{application.applicationRef}</span>
             <button
               onClick={copyRef}
-              className="text-slate-400 hover:text-slate-700 transition-colors"
+              className="text-slate-400 hover:text-slate-700 p-0.5 rounded transition-colors"
               title="Copy Reference"
             >
               {copiedRef ? <Check className="w-3 h-3 text-emerald-600" /> : <Copy className="w-3 h-3" />}
             </button>
+            {isAssignedToMe && (
+              <span className="text-[10px] text-indigo-700 font-sans font-semibold bg-indigo-50 border border-indigo-200 px-1.5 py-0.2 rounded ml-1">
+                Your Task
+              </span>
+            )}
+          </div>
+
+          {/* Status (Zero-pill clean dot + text) */}
+          <div className="flex items-center gap-1.5 text-xs font-medium">
+            <span
+              className={`w-1.5 h-1.5 rounded-full ${
+                application.status === 'APPROVED'
+                  ? 'bg-emerald-500'
+                  : application.status === 'RFI_ACTION_REQUIRED'
+                  ? 'bg-rose-500'
+                  : application.status === 'SAMPLE_REQUESTED' || application.status === 'PAYMENT_PENDING'
+                  ? 'bg-amber-500'
+                  : 'bg-indigo-500'
+              }`}
+            />
+            <span className="text-slate-700 font-semibold">{statusInfo.label}</span>
+          </div>
+        </div>
+
+        {/* Product Title & Metadata Line */}
+        <div>
+          <h3 className="text-sm sm:text-base font-semibold text-slate-900 group-hover:text-indigo-600 transition-colors line-clamp-1">
+            {application.productName}
+          </h3>
+          <div className="flex items-center gap-2 mt-1 text-xs text-slate-500 font-medium">
+            <span className="text-slate-700 font-mono font-medium">{application.modelNumber}</span>
+            <span aria-hidden="true" className="text-slate-300">·</span>
+            <span>{application.brand}</span>
+            <span aria-hidden="true" className="text-slate-300">·</span>
+            <span className="truncate max-w-[130px]">
+              {application.scheme.replace(' (MCMC/SIRIM)', '').replace(' (MS Standards)', '')}
+            </span>
+          </div>
+        </div>
+
+        {/* Officer, Supplier & SLA info */}
+        <div className="flex items-center justify-between gap-2 pt-2 border-t border-slate-100 text-xs text-slate-500">
+          <div className="flex items-center gap-1.5 truncate">
+            {application.officerName ? (
+              <>
+                <User className="w-3 h-3 text-slate-400 shrink-0" />
+                <span className="truncate">
+                  Officer: <strong className="text-slate-700 font-medium">{application.officerName}</strong>
+                </span>
+              </>
+            ) : (
+              <span>SIRIM e-ComM Register</span>
+            )}
           </div>
 
           {application.targetDeadline && (
             <div
-              className={`flex items-center gap-1 text-xs font-medium px-2 py-0.5 rounded ${
+              className={`flex items-center gap-1 font-mono text-[11px] tabular-nums shrink-0 ${
                 deadlineInfo.isOverdue
-                  ? 'bg-rose-100 text-rose-700 font-semibold animate-pulse'
+                  ? 'text-rose-600 font-semibold'
                   : deadlineInfo.isDueSoon
-                  ? 'bg-amber-100 text-amber-800 font-semibold'
-                  : 'bg-slate-100 text-slate-600'
+                  ? 'text-amber-600 font-semibold'
+                  : 'text-slate-500'
               }`}
             >
               <Clock className="w-3 h-3" />
@@ -155,100 +161,44 @@ export const ApplicationCard: React.FC<ApplicationCardProps> = ({
           )}
         </div>
 
-        {/* Officer & Supplier Information */}
-        <div className="space-y-1">
-          {application.officerName && (
-            <div className="flex items-center gap-1.5 text-xs text-slate-600">
-              <User className="w-3.5 h-3.5 text-slate-400 shrink-0" />
-              <span className="truncate">
-                Officer: <strong className="text-slate-700">{application.officerName}</strong>
-              </span>
-            </div>
-          )}
-
-          {/* Supplier tracking pill */}
-          {(application.supplierName || (application.supplierStatus && application.supplierStatus !== 'NOT_INVOLVED')) && (
-            <div className="flex items-center justify-between gap-1 text-xs bg-slate-50 border border-slate-200/90 rounded px-2 py-1">
-              <div className="flex items-center gap-1.5 min-w-0 text-slate-700 truncate">
-                <Building2 className="w-3 h-3 text-purple-600 shrink-0" />
-                <span className="font-medium truncate">{application.supplierName || 'Hardware Supplier'}</span>
-              </div>
-              {(() => {
-                const suppBadge = getSupplierStatusBadgeInfo(application.supplierStatus);
-                if (!suppBadge) return null;
-                return (
-                  <span className={`shrink-0 text-[10px] font-semibold px-1.5 py-0.5 rounded border ${suppBadge.bg} ${suppBadge.text} ${suppBadge.border}`}>
-                    {suppBadge.shortLabel}
-                  </span>
-                );
-              })()}
-            </div>
-          )}
-        </div>
-
         {/* Approved Certificate Callout */}
         {application.status === 'APPROVED' && application.certificateNo && (
-          <div className="bg-emerald-50/80 border border-emerald-200 rounded-lg p-2.5 space-y-1">
-            <div className="flex items-center justify-between text-xs">
-              <span className="font-semibold text-emerald-900 flex items-center gap-1">
+          <div className="bg-emerald-50/60 border border-emerald-200/80 rounded-lg p-2.5 space-y-0.5 text-xs">
+            <div className="flex items-center justify-between text-emerald-800">
+              <span className="font-semibold flex items-center gap-1">
                 <FileCheck className="w-3.5 h-3.5 text-emerald-600" />
-                CoC Granted
+                CoC Certificate Granted
               </span>
-              <span className="text-[11px] text-emerald-700 font-medium">
+              <span className="text-[11px] font-mono text-emerald-700">
                 Exp: {formatDate(application.certificateExpiryDate)}
               </span>
             </div>
-            <div className="font-mono text-xs font-bold text-emerald-800 truncate">
+            <div className="font-mono text-xs font-semibold text-emerald-900 truncate">
               {application.certificateNo}
             </div>
           </div>
         )}
 
-        {/* Action Items & Pending Statements Box */}
+        {/* Action Items Checklist Container */}
         {incompleteItems.length > 0 && (
-          <div
-            className={`border rounded-lg p-2.5 space-y-2 ${
-              activeActions.length > 0
-                ? 'bg-amber-50/50 border-amber-200/80'
-                : 'bg-purple-50/50 border-purple-200/80'
-            }`}
-          >
-            {/* Header distinguishes Active Action vs Pending Statement */}
-            <div className="flex items-center justify-between text-xs">
-              <span className="font-semibold flex items-center gap-1.5">
+          <div className="bg-slate-50 border border-slate-200/80 rounded-lg p-2.5 space-y-2 text-xs">
+            <div className="flex items-center justify-between text-slate-600">
+              <span className="font-semibold flex items-center gap-1 text-[11px]">
                 {activeActions.length > 0 ? (
                   <>
-                    <AlertTriangle className="w-3.5 h-3.5 text-amber-600 shrink-0" />
-                    <span className="text-amber-900">
-                      Action Required ({activeActions.length})
-                    </span>
+                    <AlertTriangle className="w-3 h-3 text-amber-500 shrink-0" />
+                    <span>Action Required ({activeActions.length})</span>
                   </>
                 ) : (
                   <>
-                    <Clock className="w-3.5 h-3.5 text-purple-600 shrink-0" />
-                    <span className="text-purple-900">
-                      Pending Statement ({pendingStatements.length})
-                    </span>
+                    <Clock className="w-3 h-3 text-indigo-500 shrink-0" />
+                    <span>Pending Statements ({pendingStatements.length})</span>
                   </>
                 )}
               </span>
-
-              <div className="flex items-center gap-1">
-                {activeActions.length > 0 && pendingStatements.length > 0 && (
-                  <span className="text-[10px] font-semibold px-1.5 py-0.2 rounded bg-purple-100 text-purple-800 border border-purple-200">
-                    +{pendingStatements.length} waiting
-                  </span>
-                )}
-                <span className="text-[11px] text-slate-500 font-medium">
-                  {activeActions.length > 0
-                    ? 'Cytron Action'
-                    : pendingStatements.some((a) => a.assignedTo === 'SUPPLIER')
-                    ? 'Waiting on Supplier'
-                    : pendingStatements.some((a) => a.assignedTo === 'SIRIM')
-                    ? 'Waiting on SIRIM'
-                    : 'Waiting on Lab'}
-                </span>
-              </div>
+              <span className="text-[11px] text-slate-400 font-medium">
+                {activeActions.length > 0 ? 'Cytron Action' : 'External Follow-up'}
+              </span>
             </div>
 
             <div className="space-y-1.5">
@@ -261,49 +211,44 @@ export const ApplicationCard: React.FC<ApplicationCardProps> = ({
                   <div
                     key={action.id}
                     onClick={(e) => e.stopPropagation()}
-                    className={`flex items-start gap-2 text-xs p-2 rounded-lg border transition-all ${
-                      isStmt
-                        ? 'bg-white/95 border-purple-200/70 shadow-2xs'
-                        : 'bg-white border-amber-200/80 shadow-2xs'
-                    }`}
+                    className="flex items-start gap-2 bg-white border border-slate-200/80 rounded-md p-2 shadow-2xs hover:border-slate-300 transition-colors"
                   >
                     <input
                       type="checkbox"
                       checked={action.isCompleted}
                       onChange={() => onToggleActionItem(application.id, action.id)}
-                      className={`mt-0.5 h-3.5 w-3.5 rounded cursor-pointer ${
-                        isStmt
-                          ? 'border-purple-300 text-purple-600 focus:ring-purple-500'
-                          : 'border-amber-300 text-amber-600 focus:ring-amber-500'
-                      }`}
-                      title={isStmt ? "Mark statement as resolved/received" : "Mark action as completed"}
+                      className="mt-0.5 h-3.5 w-3.5 rounded border-slate-300 text-slate-900 focus:ring-slate-900 cursor-pointer"
+                      title={isStmt ? 'Mark statement as resolved' : 'Mark action as completed'}
                     />
                     <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-1.5 flex-wrap mb-0.5">
-                        <span
-                          className={`text-[9px] font-bold px-1.5 py-0.2 rounded border ${labelInfo.tagClass}`}
-                        >
+                      <div className="flex items-center gap-1.5 flex-wrap mb-0.5 text-[10px]">
+                        <span className="font-semibold text-slate-700">
                           {isStmt ? labelInfo.shortLabel : 'Action Required'}
                         </span>
-                        <span
-                          className={`text-[9px] font-bold px-1 rounded border ${pInfo.bg} ${pInfo.text} ${pInfo.border}`}
-                        >
+                        <span aria-hidden="true" className="text-slate-300">·</span>
+                        <span className={`font-semibold ${action.priority === 'CRITICAL' ? 'text-rose-600' : 'text-slate-500'}`}>
                           {action.priority}
                         </span>
-                        {action.dueDate && (
-                          <span className="text-[10px] text-slate-500 ml-auto font-mono">
+                        {action.autoResolvedByAi && (
+                          <span className="inline-flex items-center gap-0.5 text-indigo-600 font-medium ml-auto">
+                            <Bot className="w-2.5 h-2.5" /> AI Verified
+                          </span>
+                        )}
+                        {action.dueDate && !action.autoResolvedByAi && (
+                          <span className="text-slate-400 ml-auto font-mono tabular-nums">
                             {formatDate(action.dueDate)}
                           </span>
                         )}
                       </div>
-                      <p className="font-medium text-slate-800 line-clamp-1">{action.title}</p>
+                      <p className="font-medium text-slate-800 line-clamp-1 text-xs">{action.title}</p>
                     </div>
                   </div>
                 );
               })}
+
               {incompleteItems.length > 2 && (
-                <div className="text-[11px] text-slate-500 text-center font-medium pt-0.5">
-                  +{incompleteItems.length - 2} more items
+                <div className="text-[11px] text-slate-400 text-center font-medium pt-0.5">
+                  +{incompleteItems.length - 2} more requirements
                 </div>
               )}
             </div>
@@ -312,58 +257,52 @@ export const ApplicationCard: React.FC<ApplicationCardProps> = ({
       </div>
 
       {/* Footer / Quick Actions */}
-      <div className="px-4 py-2.5 bg-slate-50/80 border-t border-slate-100 flex items-center justify-between gap-2">
-        <div className="flex items-center gap-2 text-xs text-slate-500 min-w-0 truncate">
+      <div className="pt-3 mt-3 border-t border-slate-100 flex items-center justify-between gap-2 text-xs">
+        <div className="flex items-center gap-1.5 text-slate-500 truncate min-w-0">
           <a
             href={getGmailThreadUrl(application)}
             target="_blank"
             rel="noreferrer"
             onClick={(e) => e.stopPropagation()}
-            className="flex items-center gap-1 text-sky-600 hover:text-sky-800 hover:underline font-medium truncate"
-            title={application.emailSubject ? `Open email: "${application.emailSubject}"` : 'Open in Gmail'}
+            className="flex items-center gap-1 text-slate-600 hover:text-slate-900 font-medium hover:underline truncate"
+            title={application.emailSubject || 'Open email thread'}
           >
-            <Mail className="w-3.5 h-3.5 shrink-0" />
-            <span className="truncate">{application.emailSubject ? 'Gmail Thread' : `${application.emailThreads.length} emails`}</span>
-            <ExternalLink className="w-2.5 h-2.5 shrink-0 opacity-70" />
+            <Mail className="w-3 h-3 text-slate-400 shrink-0" />
+            <span className="truncate">Thread</span>
+            <ExternalLink className="w-2.5 h-2.5 text-slate-400 shrink-0" />
           </a>
-          <span>•</span>
-          <span className="shrink-0">{formatDate(application.lastActivityDate)}</span>
-          {application.lastModifiedBy && (
-            <>
-              <span>•</span>
-              <span className="shrink-0 text-slate-400 truncate max-w-[90px]" title={`Last updated by ${application.lastModifiedBy}`}>
-                by {application.lastModifiedBy.split('@')[0]}
-              </span>
-            </>
-          )}
+          <span aria-hidden="true" className="text-slate-300">·</span>
+          <span className="font-mono text-[11px] tabular-nums shrink-0 text-slate-400">
+            {formatDate(application.lastActivityDate)}
+          </span>
         </div>
 
         <div className="flex items-center gap-1.5 shrink-0" onClick={(e) => e.stopPropagation()}>
           {incompleteItems.length > 0 && (
             <button
               onClick={() => onQuickDraftReply(application)}
-              className="flex items-center gap-1 px-2.5 py-1 text-xs font-semibold text-indigo-700 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 rounded-md transition-colors shadow-2xs"
-              title="Draft Official AI Reply to SIRIM"
+              className="inline-flex items-center gap-1 px-2 py-1 text-xs font-semibold text-slate-700 bg-slate-50 hover:bg-slate-100 border border-slate-200/80 rounded-md transition-colors shadow-2xs"
+              title="Draft Official AI Reply"
             >
               <Sparkles className="w-3 h-3 text-indigo-600" />
-              <span>AI Reply</span>
+              <span>Draft</span>
             </button>
           )}
 
           <button
             onClick={() => onSelect(application)}
-            className="px-2.5 py-1 text-xs font-medium text-slate-700 hover:text-slate-900 hover:bg-slate-200 rounded-md transition-colors"
+            className="px-2 py-1 text-xs font-semibold text-slate-700 hover:text-slate-900 hover:bg-slate-100 rounded-md transition-colors"
           >
-            Details →
+            Details
           </button>
 
           {onDelete && (
             <button
               onClick={(e) => onDelete(application.id, e)}
-              className="p-1 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-md transition-colors"
-              title="Delete this application record"
+              className="p-1 text-slate-400 hover:text-rose-600 rounded transition-colors"
+              title="Delete application"
             >
-              <Trash2 className="w-3.5 h-3.5" />
+              <Trash2 className="w-3 h-3" />
             </button>
           )}
         </div>

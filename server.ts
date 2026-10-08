@@ -858,7 +858,18 @@ async function startServer() {
             (a) => (act.id && a.id === act.id) || (act.title && a.title.toLowerCase() === act.title.toLowerCase())
           );
           if (actIdx >= 0) {
-            mergedActions[actIdx] = { ...mergedActions[actIdx], ...act };
+            const currentAct = mergedActions[actIdx];
+            const isCompleted = currentAct.isCompleted || act.isCompleted;
+            mergedActions[actIdx] = {
+              ...currentAct,
+              ...act,
+              isCompleted,
+              completedAt: currentAct.completedAt || act.completedAt,
+              completedBy: currentAct.completedBy || act.completedBy,
+              autoResolvedByAi: currentAct.autoResolvedByAi || act.autoResolvedByAi,
+              autoResolvedReason: currentAct.autoResolvedReason || act.autoResolvedReason,
+              autoResolvedAt: currentAct.autoResolvedAt || act.autoResolvedAt,
+            };
           } else {
             mergedActions.push(act);
           }

@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import {
   FileSpreadsheet,
   Mail,
@@ -7,10 +7,8 @@ import {
   RefreshCw,
   ExternalLink,
   ShieldCheck,
-  Radio,
   User,
   LogOut,
-  Sparkles,
   Zap,
   Send,
   Trash2,
@@ -18,7 +16,8 @@ import {
   FileCheck,
   Database,
   Activity,
-  Users,
+  MoreHorizontal,
+  ChevronDown,
 } from 'lucide-react';
 import { AutomationConfig, SheetSyncConfig, UserAuthSession, UserPresence } from '../types';
 
@@ -57,7 +56,6 @@ export const Header: React.FC<HeaderProps> = ({
   criticalActionsCount,
   applicationsCount = 0,
   serverSyncStatus = 'synced',
-  lastServerSyncTime,
   activeUsers = [],
   onRefreshFromServer,
   onOpenSheetModal,
@@ -73,289 +71,331 @@ export const Header: React.FC<HeaderProps> = ({
   onExportCsv,
   onOpenPreScreen,
   isSyncingSheet,
-  isRunningAutomation,
 }) => {
+  const [isMoreOpen, setIsMoreOpen] = useState(false);
+  const moreRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      if (moreRef.current && !moreRef.current.contains(e.target as Node)) {
+        setIsMoreOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
   const isTelegramReady = Boolean(
     automationConfig.telegram?.botToken?.trim() && automationConfig.telegram?.chatId?.trim()
   );
 
+  const validActiveUsers = (activeUsers || []).filter((u) => {
+    if (!u || !u.email) return false;
+    const em = u.email.toLowerCase().trim();
+    const nm = (u.name || '').toLowerCase().trim();
+    return (
+      em !== 'team-member@cytron.io' &&
+      !em.includes('team-member') &&
+      !em.startsWith('team-') &&
+      nm !== 'team-member' &&
+      nm !== 'teammember' &&
+      em.includes('@')
+    );
+  });
+
   return (
-    <header className="h-16 bg-slate-900 text-white flex items-center justify-between px-6 sm:px-8 shrink-0 shadow-lg z-10 sticky top-0">
-      {/* Logo & Brand */}
-      <div className="flex items-center gap-3">
-        <div className="w-8 h-8 bg-indigo-500 rounded flex items-center justify-center shadow-inner">
-          <ShieldCheck className="w-5 h-5 text-white" />
+    <header className="h-14 bg-white/95 backdrop-blur-md border-b border-slate-200/80 sticky top-0 z-30 px-4 sm:px-6 flex items-center justify-between text-slate-800 transition-colors">
+      {/* Left: Brand & Telemetry */}
+      <div className="flex items-center gap-4 sm:gap-6">
+        <div className="flex items-center gap-2.5">
+          <div className="w-7 h-7 rounded-lg bg-slate-900 text-white flex items-center justify-center shadow-xs shrink-0">
+            <ShieldCheck className="w-4 h-4 text-white" />
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="font-semibold text-slate-900 tracking-tight text-sm">
+              SIRIM CoC
+            </span>
+            <span className="text-[11px] font-medium text-slate-400 hidden sm:inline">
+              Workspace
+            </span>
+          </div>
         </div>
-        <div>
-          <h1 className="text-lg sm:text-xl font-bold tracking-tight leading-none">
-            SIRIM CoC <span className="text-indigo-400">Progress Tracker</span>
-          </h1>
-          <span className="text-[10px] text-slate-400 hidden sm:inline">
-            Automated Regulatory Intelligence Register
-          </span>
+
+        <div className="h-4 w-px bg-slate-200 hidden md:block" />
+
+        {/* Database & Sync Status */}
+        <div className="hidden md:flex items-center gap-2">
+          <div
+            className="flex items-center gap-1.5 px-2 py-1 rounded-md text-[11px] font-medium bg-slate-50 border border-slate-200/80 text-slate-600"
+            title={
+              serverSyncStatus === 'synced'
+                ? `Team Database: Synced (${applicationsCount} applications)`
+                : serverSyncStatus === 'syncing'
+                ? 'Syncing with Server Database...'
+                : 'Offline Cache'
+            }
+          >
+            <span
+              className={`w-1.5 h-1.5 rounded-full ${
+                serverSyncStatus === 'synced'
+                  ? 'bg-emerald-500'
+                  : serverSyncStatus === 'syncing'
+                  ? 'bg-sky-500 animate-ping'
+                  : 'bg-amber-500'
+              }`}
+            />
+            <span className="font-mono tabular-nums text-slate-700 font-semibold">
+              {applicationsCount}
+            </span>
+            <span>files</span>
+            {onRefreshFromServer && (
+              <button
+                onClick={onRefreshFromServer}
+                disabled={serverSyncStatus === 'syncing'}
+                className="text-slate-400 hover:text-slate-700 p-0.5 ml-0.5 rounded transition-colors"
+                title="Refresh shared records"
+              >
+                <RefreshCw
+                  className={`w-2.5 h-2.5 ${serverSyncStatus === 'syncing' ? 'animate-spin text-sky-500' : ''}`}
+                />
+              </button>
+            )}
+          </div>
+
+          {/* Automation Status */}
+          <button
+            onClick={onOpenAutomationModal}
+            className={`flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium border transition-colors ${
+              automationConfig.enabled
+                ? 'bg-slate-50 border-slate-200 text-slate-700 hover:bg-slate-100'
+                : 'bg-slate-50 border-slate-200 text-slate-400 hover:text-slate-600'
+            }`}
+            title="Automation & Telegram digest settings"
+          >
+            <Zap
+              className={`w-3 h-3 ${
+                automationConfig.enabled ? 'text-amber-500 fill-amber-500' : 'text-slate-400'
+              }`}
+            />
+            <span>{automationConfig.enabled ? automationConfig.scheduleTime : 'Off'}</span>
+            {isTelegramReady && <Send className="w-2.5 h-2.5 text-sky-500 ml-0.5" />}
+          </button>
         </div>
       </div>
 
-      {/* Quick Actions & Workspace Integrations */}
-      <div className="flex items-center gap-3 sm:gap-4">
-        {/* Automation & Telegram Bot Control Center */}
-        <button
-          onClick={onOpenAutomationModal}
-          className={`px-3 py-1.5 rounded-lg text-xs font-semibold border transition-all flex items-center gap-1.5 shadow-xs ${
-            automationConfig.enabled
-              ? 'bg-indigo-950/80 border-indigo-500/50 text-indigo-200 hover:bg-indigo-900/90'
-              : 'bg-slate-800/80 border-slate-700 text-slate-300 hover:bg-slate-700'
-          }`}
-          title="Configure Morning Automation & Telegram Bot"
-        >
-          <Zap className={`w-3.5 h-3.5 ${automationConfig.enabled ? 'text-amber-400 animate-pulse' : 'text-slate-400'}`} />
-          <span className="hidden md:inline font-medium">
-            {automationConfig.enabled ? `Auto: ${automationConfig.scheduleTime}` : 'Automation'}
-          </span>
-          {isTelegramReady && (
-            <Send className="w-3 h-3 text-sky-400 ml-0.5" />
-          )}
-        </button>
-
-        {/* Shared Team Server Database Status */}
-        <div
-          className={`hidden md:flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs border transition-colors ${
-            serverSyncStatus === 'synced'
-              ? 'bg-slate-800/80 border-slate-700/80 text-slate-300'
-              : serverSyncStatus === 'syncing'
-              ? 'bg-sky-950/70 border-sky-600/50 text-sky-200'
-              : 'bg-amber-950/70 border-amber-600/50 text-amber-200'
-          }`}
-          title={
-            serverSyncStatus === 'synced'
-              ? `Shared Team Database: Active & Synced (${applicationsCount} applications). Click to refresh.`
-              : serverSyncStatus === 'syncing'
-              ? 'Syncing with Raspberry Pi / Server Database...'
-              : 'Server offline or using local cache'
-          }
-        >
-          <Database className={`w-3.5 h-3.5 ${serverSyncStatus === 'synced' ? 'text-emerald-400' : serverSyncStatus === 'syncing' ? 'text-sky-400 animate-spin' : 'text-amber-400'}`} />
-          <span className="font-medium text-[11px]">
-            {serverSyncStatus === 'synced' ? (
-              <>Shared DB <span className="text-emerald-400 font-bold">({applicationsCount})</span></>
-            ) : serverSyncStatus === 'syncing' ? (
-              'Syncing...'
-            ) : (
-              'Offline Cache'
-            )}
-          </span>
-          {onRefreshFromServer && (
-            <button
-              onClick={onRefreshFromServer}
-              disabled={serverSyncStatus === 'syncing'}
-              className="text-slate-400 hover:text-white p-0.5 ml-0.5 rounded transition-colors"
-              title="Refresh shared records from Raspberry Pi / Server"
-            >
-              <RefreshCw className={`w-2.5 h-2.5 ${serverSyncStatus === 'syncing' ? 'animate-spin text-sky-400' : ''}`} />
-            </button>
-          )}
-        </div>
-
-        {/* Sync Status / Google Sheets */}
-        {sheetConfig?.spreadsheetUrl ? (
-          <div className="flex flex-col items-end hidden lg:flex">
-            <span className="text-[10px] text-slate-400 uppercase tracking-widest flex items-center gap-1">
-              Google Sheet <ExternalLink className="w-2.5 h-2.5" />
-            </span>
-            <div className="flex items-center gap-1.5">
-              <a
-                href={sheetConfig.spreadsheetUrl}
-                target="_blank"
-                rel="noreferrer"
-                className="text-xs font-medium hover:text-emerald-400 transition-colors truncate max-w-[140px]"
-                title="Open Master Google Sheet"
-              >
-                {sheetConfig.sheetName || 'Active CoC Applications'}
-              </a>
-              <button
-                onClick={onManualSyncSheet}
-                disabled={isSyncingSheet}
-                className="text-slate-400 hover:text-white transition-colors p-0.5"
-                title="Sync All Applications to Google Sheet"
-              >
-                <RefreshCw className={`w-3 h-3 ${isSyncingSheet ? 'animate-spin text-emerald-400' : ''}`} />
-              </button>
-            </div>
-          </div>
-        ) : (
-          <button
-            onClick={onOpenSheetModal}
-            className="hidden sm:flex text-xs font-medium text-emerald-300 hover:text-emerald-200 transition-colors items-center gap-1.5 bg-emerald-950/60 border border-emerald-800/60 px-2.5 py-1.5 rounded-lg"
+      {/* Right: Active Collaborators, Tools & Actions */}
+      <div className="flex items-center gap-2 sm:gap-2.5">
+        {/* Collaborators Stack */}
+        {validActiveUsers.length > 0 && (
+          <div
+            className="hidden lg:flex items-center -space-x-1.5 pr-1"
+            title={`Active team: ${validActiveUsers.map((u) => u.name || u.email.split('@')[0]).join(', ')}`}
           >
-            <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-400" />
-            Connect Sheet
-          </button>
+            {validActiveUsers.slice(0, 3).map((usr) => {
+              const displayName = usr.name || usr.email.split('@')[0];
+              const initial = displayName.charAt(0).toUpperCase();
+              return (
+                <div
+                  key={usr.email}
+                  className="w-6 h-6 rounded-full border-2 border-white bg-slate-800 text-white font-semibold text-[10px] flex items-center justify-center shrink-0 overflow-hidden shadow-2xs"
+                  title={`${displayName} (${usr.email})`}
+                >
+                  {usr.picture ? (
+                    <img
+                      src={usr.picture}
+                      alt={displayName}
+                      className="w-full h-full object-cover"
+                      referrerPolicy="no-referrer"
+                    />
+                  ) : (
+                    initial
+                  )}
+                </div>
+              );
+            })}
+            {validActiveUsers.length > 3 && (
+              <span className="w-5 h-5 rounded-full bg-slate-100 text-slate-600 text-[9px] font-semibold flex items-center justify-center border border-white">
+                +{validActiveUsers.length - 3}
+              </span>
+            )}
+          </div>
         )}
 
-        <div className="h-6 w-px bg-slate-700 hidden sm:block"></div>
-
-        {/* Scan & Ingest */}
-        <div className="flex items-center gap-2">
-          <button
-            onClick={onOpenGmailScanner}
-            className="bg-slate-800 hover:bg-slate-700 px-3 py-1.5 rounded-lg text-xs font-medium border border-slate-700 transition-colors flex items-center gap-1.5"
-            title="Scan Gmail Inbox"
-          >
-            <Mail className="w-3.5 h-3.5 text-sky-400" />
-            <span className="hidden sm:inline">Scan Gmail</span>
-          </button>
-          <button
-            onClick={onOpenNewAppModal}
-            className="bg-indigo-600 hover:bg-indigo-500 text-white px-3 py-1.5 rounded-lg text-xs font-medium border border-indigo-500 transition-colors flex items-center gap-1.5 shadow-xs"
-          >
-            <Sparkles className="w-3.5 h-3.5 text-indigo-200" />
-            <span className="hidden sm:inline">Ingest Email</span>
-          </button>
-
-          {onOpenPreScreen && (
-            <button
-              onClick={onOpenPreScreen}
-              className="hidden lg:flex items-center gap-1.5 bg-slate-800 hover:bg-slate-700 px-3 py-1.5 rounded-lg text-xs font-medium border border-slate-700 transition-colors text-indigo-300 hover:text-indigo-200"
-              title="Pre-Screen compliance test report with AI"
-            >
-              <FileCheck className="w-3.5 h-3.5 text-indigo-400" />
-              <span>AI Pre-Screen</span>
-            </button>
-          )}
-
-          {onExportCsv && (
-            <button
-              onClick={onExportCsv}
-              className="hidden xl:flex items-center gap-1 text-xs text-slate-300 hover:text-white bg-slate-800 hover:bg-slate-700 border border-slate-700 px-2.5 py-1.5 rounded-lg transition-colors font-medium shadow-xs"
-              title="Export all applications to CSV"
-            >
-              <Download className="w-3.5 h-3.5 text-slate-400" />
-              <span>Export CSV</span>
-            </button>
-          )}
-
-          {applicationsCount > 0 && onClearAll && (
-            <button
-              onClick={onClearAll}
-              className="hidden xl:flex items-center gap-1 text-xs text-rose-300 hover:text-rose-100 bg-rose-950/60 hover:bg-rose-900/80 border border-rose-800/60 px-2.5 py-1.5 rounded-lg transition-colors font-medium shadow-xs"
-              title="Clear all application data and start fresh"
-            >
-              <Trash2 className="w-3.5 h-3.5 text-rose-400" />
-              <span>Clear Data</span>
-            </button>
-          )}
-        </div>
-
-        <div className="h-6 w-px bg-slate-700 hidden sm:block"></div>
-
-        {/* Team Presence Avatar Cluster */}
-        {(() => {
-          const validActiveUsers = (activeUsers || []).filter((u) => {
-            if (!u || !u.email) return false;
-            const em = u.email.toLowerCase().trim();
-            const nm = (u.name || '').toLowerCase().trim();
-            return (
-              em !== 'team-member@cytron.io' &&
-              !em.includes('team-member') &&
-              !em.startsWith('team-') &&
-              nm !== 'team-member' &&
-              nm !== 'teammember' &&
-              em.includes('@')
-            );
-          });
-
-          if (validActiveUsers.length === 0) return null;
-
-          return (
-            <div
-              className="hidden md:flex items-center -space-x-1.5 px-1.5 py-0.5 rounded-lg bg-slate-800/70 border border-slate-700/60"
-              title={`Active team collaborators (${validActiveUsers.length}): ${validActiveUsers
-                .map((u) => u.name || u.email.split('@')[0])
-                .join(', ')}`}
-            >
-              {validActiveUsers.slice(0, 3).map((usr) => {
-                const displayName = usr.name || usr.email.split('@')[0];
-                const initial = displayName.charAt(0).toUpperCase();
-                return (
-                  <div
-                    key={usr.email}
-                    className="relative w-6 h-6 rounded-full border-2 border-slate-900 overflow-hidden bg-indigo-600 text-white font-bold text-[10px] flex items-center justify-center shrink-0 shadow-xs"
-                    title={`${displayName} (${usr.email}) - Online`}
-                  >
-                    {usr.picture ? (
-                      <img
-                        src={usr.picture}
-                        alt={displayName}
-                        className="w-full h-full object-cover"
-                        referrerPolicy="no-referrer"
-                      />
-                    ) : (
-                      initial
-                    )}
-                    <span className="absolute bottom-0 right-0 w-1.5 h-1.5 bg-emerald-400 rounded-full ring-1 ring-slate-900" />
-                  </div>
-                );
-              })}
-              {validActiveUsers.length > 3 && (
-                <span className="w-5 h-5 rounded-full bg-slate-700 text-slate-300 text-[9px] font-bold flex items-center justify-center border border-slate-800 pl-0.5">
-                  +{validActiveUsers.length - 3}
-                </span>
-              )}
-            </div>
-          );
-        })()}
-
-        {/* Team Activity Feed Button */}
+        {/* Team Activity Audit Button */}
         {onOpenActivityDrawer && (
           <button
             onClick={onOpenActivityDrawer}
-            className="relative text-slate-300 hover:text-white transition-colors p-1.5 rounded-lg hover:bg-slate-800 flex items-center gap-1"
-            title="Open Team Activity & Audit Feed"
+            className="p-1.5 rounded-lg text-slate-500 hover:text-slate-900 hover:bg-slate-100 transition-colors"
+            title="Team Activity & Audit Trail"
           >
-            <Activity className="w-4 h-4 text-indigo-400" />
-            <span className="text-[11px] font-medium hidden lg:inline text-slate-300">Activity</span>
+            <Activity className="w-4 h-4" />
           </button>
         )}
 
         {/* Notifications Bell */}
         <button
           onClick={onOpenNotificationDrawer}
-          className="relative text-slate-300 hover:text-white transition-colors p-1 rounded-lg hover:bg-slate-800"
-          title="Pending Action Items & Alerts"
+          className="relative p-1.5 rounded-lg text-slate-500 hover:text-slate-900 hover:bg-slate-100 transition-colors"
+          title="Action items & alerts"
         >
           <Bell className="w-4 h-4" />
           {pendingActionsCount > 0 && (
             <span
-              className={`absolute -top-0.5 -right-0.5 flex items-center justify-center min-w-[15px] h-[15px] px-0.5 text-[8px] font-bold rounded-full text-white ring-2 ring-slate-900 ${
-                criticalActionsCount > 0 ? 'bg-rose-500 animate-pulse' : 'bg-amber-500'
+              className={`absolute top-1 right-1 w-2 h-2 rounded-full ring-2 ring-white ${
+                criticalActionsCount > 0 ? 'bg-rose-500' : 'bg-amber-500'
               }`}
-            >
-              {pendingActionsCount}
-            </span>
+            />
           )}
         </button>
 
-        {/* Google OAuth Session */}
-        {authSession?.isAuthenticated ? (
-          <div className="flex items-center gap-2 bg-slate-800/80 border border-slate-700 pl-2.5 pr-1.5 py-1 rounded-xl shadow-xs">
-            <div className="flex flex-col text-right hidden sm:block">
-              <span className="text-[11px] font-bold text-slate-200 leading-tight truncate max-w-[120px]">
-                {authSession.name || authSession.email?.split('@')[0] || 'User'}
-              </span>
-              <span className="text-[9px] text-indigo-400 font-mono leading-none truncate max-w-[120px]">
-                {authSession.email || 'Connected'}
-              </span>
+        {/* Sheet Connection Status Link */}
+        {sheetConfig?.spreadsheetUrl ? (
+          <div className="hidden xl:flex items-center gap-1.5 text-xs text-slate-600 border border-slate-200/80 rounded-lg px-2 py-1 bg-slate-50">
+            <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+            <a
+              href={sheetConfig.spreadsheetUrl}
+              target="_blank"
+              rel="noreferrer"
+              className="font-medium hover:text-slate-900 truncate max-w-[110px]"
+              title="Open Google Sheet"
+            >
+              {sheetConfig.sheetName || 'Google Sheet'}
+            </a>
+            <button
+              onClick={onManualSyncSheet}
+              disabled={isSyncingSheet}
+              className="text-slate-400 hover:text-slate-700 p-0.5 rounded transition-colors"
+              title="Sync with Google Sheet"
+            >
+              <RefreshCw
+                className={`w-2.5 h-2.5 ${isSyncingSheet ? 'animate-spin text-emerald-600' : ''}`}
+              />
+            </button>
+          </div>
+        ) : null}
+
+        {/* Secondary: Scan Gmail */}
+        <button
+          onClick={onOpenGmailScanner}
+          className="hidden sm:inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-700 bg-white hover:bg-slate-50 border border-slate-200/80 rounded-lg shadow-2xs transition-colors"
+          title="Scan Gmail Inbox for SIRIM communications"
+        >
+          <Mail className="w-3.5 h-3.5 text-slate-500" />
+          <span>Scan Inbox</span>
+        </button>
+
+        {/* Primary Action: + Ingest Email */}
+        <button
+          onClick={onOpenNewAppModal}
+          className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-white bg-slate-900 hover:bg-slate-800 rounded-lg shadow-xs transition-colors"
+          title="Ingest new SIRIM email or manual thread"
+        >
+          <Plus className="w-3.5 h-3.5" />
+          <span>Ingest Email</span>
+        </button>
+
+        {/* More Actions Dropdown Menu */}
+        <div className="relative" ref={moreRef}>
+          <button
+            onClick={() => setIsMoreOpen(!isMoreOpen)}
+            className="p-1.5 text-slate-500 hover:text-slate-900 hover:bg-slate-100 rounded-lg transition-colors"
+            title="More workspace actions"
+          >
+            <MoreHorizontal className="w-4 h-4" />
+          </button>
+
+          {isMoreOpen && (
+            <div className="absolute right-0 mt-1 w-52 bg-white border border-slate-200 rounded-xl shadow-lg py-1.5 text-xs text-slate-700 z-50 divide-y divide-slate-100">
+              <div className="py-1">
+                <button
+                  onClick={() => {
+                    setIsMoreOpen(false);
+                    onOpenGmailScanner();
+                  }}
+                  className="sm:hidden w-full text-left px-3.5 py-1.5 hover:bg-slate-50 flex items-center gap-2 font-medium"
+                >
+                  <Mail className="w-3.5 h-3.5 text-slate-500" />
+                  <span>Scan Inbox</span>
+                </button>
+                <button
+                  onClick={() => {
+                    setIsMoreOpen(false);
+                    onOpenSheetModal();
+                  }}
+                  className="w-full text-left px-3.5 py-1.5 hover:bg-slate-50 flex items-center gap-2 font-medium"
+                >
+                  <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-600" />
+                  <span>{sheetConfig?.spreadsheetId ? 'Configure Sheet Sync' : 'Connect Google Sheet'}</span>
+                </button>
+                {onOpenPreScreen && (
+                  <button
+                    onClick={() => {
+                      setIsMoreOpen(false);
+                      onOpenPreScreen();
+                    }}
+                    className="w-full text-left px-3.5 py-1.5 hover:bg-slate-50 flex items-center gap-2 font-medium"
+                  >
+                    <FileCheck className="w-3.5 h-3.5 text-indigo-600" />
+                    <span>AI Pre-Screen Compliance</span>
+                  </button>
+                )}
+                <button
+                  onClick={() => {
+                    setIsMoreOpen(false);
+                    onOpenAutomationModal();
+                  }}
+                  className="w-full text-left px-3.5 py-1.5 hover:bg-slate-50 flex items-center gap-2 font-medium"
+                >
+                  <Zap className="w-3.5 h-3.5 text-amber-500" />
+                  <span>Automation & Telegram Bot</span>
+                </button>
+              </div>
+
+              <div className="py-1">
+                {onExportCsv && (
+                  <button
+                    onClick={() => {
+                      setIsMoreOpen(false);
+                      onExportCsv();
+                    }}
+                    className="w-full text-left px-3.5 py-1.5 hover:bg-slate-50 flex items-center gap-2 text-slate-600 font-medium"
+                  >
+                    <Download className="w-3.5 h-3.5 text-slate-400" />
+                    <span>Export Register to CSV</span>
+                  </button>
+                )}
+                {applicationsCount > 0 && onClearAll && (
+                  <button
+                    onClick={() => {
+                      setIsMoreOpen(false);
+                      onClearAll();
+                    }}
+                    className="w-full text-left px-3.5 py-1.5 hover:bg-rose-50 text-rose-600 flex items-center gap-2 font-medium"
+                  >
+                    <Trash2 className="w-3.5 h-3.5 text-rose-500" />
+                    <span>Clear All Data</span>
+                  </button>
+                )}
+              </div>
             </div>
+          )}
+        </div>
+
+        <div className="h-4 w-px bg-slate-200" />
+
+        {/* User Account / Google Auth */}
+        {authSession?.isAuthenticated ? (
+          <div className="flex items-center gap-2">
             <div
-              className="w-7 h-7 rounded-full bg-indigo-500/20 flex items-center justify-center text-indigo-300 font-bold text-xs border border-indigo-400/40 overflow-hidden shadow-xs shrink-0"
-              title={`Signed in as ${authSession.email}. Click to sign out.`}
+              className="w-7 h-7 rounded-full bg-slate-100 border border-slate-200/80 overflow-hidden flex items-center justify-center text-xs font-semibold text-slate-700 shrink-0"
+              title={`Signed in as ${authSession.email}`}
             >
               {authSession.picture ? (
                 <img
                   src={authSession.picture}
-                  alt="User avatar"
-                  referrerPolicy="no-referrer"
+                  alt={authSession.name || 'User'}
                   className="w-full h-full object-cover"
+                  referrerPolicy="no-referrer"
                 />
               ) : (
                 (authSession.email?.charAt(0) || 'U').toUpperCase()
@@ -363,8 +403,8 @@ export const Header: React.FC<HeaderProps> = ({
             </div>
             <button
               onClick={onDisconnectGoogle}
-              className="p-1 text-slate-400 hover:text-rose-400 rounded-md hover:bg-slate-700 transition-colors"
-              title="Sign out / Switch Google account"
+              className="p-1 text-slate-400 hover:text-slate-600 rounded transition-colors"
+              title="Sign out of Google"
             >
               <LogOut className="w-3.5 h-3.5" />
             </button>
@@ -372,15 +412,14 @@ export const Header: React.FC<HeaderProps> = ({
         ) : (
           <button
             onClick={onConnectGoogle}
-            className="bg-indigo-600 hover:bg-indigo-500 text-white px-3 py-1.5 rounded-xl text-xs font-semibold border border-indigo-500 transition-all flex items-center gap-1.5 shadow-xs"
-            title="Sign in with Google to scan your Gmail inbox & sync Google Sheets"
+            className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium text-slate-700 bg-white hover:bg-slate-50 border border-slate-200 rounded-lg shadow-2xs transition-colors"
+            title="Sign in with Google to enable Gmail scanning"
           >
-            <User className="w-3.5 h-3.5" />
-            <span>Sign in with Google</span>
+            <User className="w-3 h-3 text-slate-500" />
+            <span className="hidden sm:inline">Sign In</span>
           </button>
         )}
       </div>
     </header>
   );
 };
-

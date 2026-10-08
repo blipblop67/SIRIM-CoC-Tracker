@@ -1,13 +1,11 @@
 import React from 'react';
 import {
   Search,
-  Filter,
   LayoutGrid,
   List,
-  SlidersHorizontal,
   X,
-  Trash2,
   Download,
+  Filter,
 } from 'lucide-react';
 import { CertificationScheme } from '../types';
 
@@ -43,15 +41,14 @@ export const FilterBar: React.FC<FilterBarProps> = ({
   totalFilteredCount,
   totalAppsCount = 0,
   currentUserEmail,
-  onClearAll,
   onExportCsv,
 }) => {
   const statusTabs = [
-    { id: 'ALL', label: 'All Applications' },
-    { id: 'ACTION_REQUIRED', label: 'Action Required', highlight: true },
-    { id: 'IN_PROGRESS', label: 'In Progress' },
-    { id: 'APPROVED', label: 'Approved (CoC Issued)' },
-    { id: 'PAYMENT', label: 'Payment Pending' },
+    { id: 'ALL', label: 'All' },
+    { id: 'ACTION_REQUIRED', label: 'Action Required', dot: 'bg-rose-500' },
+    { id: 'IN_PROGRESS', label: 'In Progress', dot: 'bg-indigo-500' },
+    { id: 'APPROVED', label: 'Approved', dot: 'bg-emerald-500' },
+    { id: 'PAYMENT', label: 'Payment', dot: 'bg-amber-500' },
   ];
 
   const schemes: CertificationScheme[] = [
@@ -62,7 +59,8 @@ export const FilterBar: React.FC<FilterBarProps> = ({
     'Safety & EMC (MS Standards)',
   ];
 
-  const hasActiveFilters = searchQuery !== '' || statusFilter !== 'ALL' || schemeFilter !== 'ALL' || assigneeFilter !== 'ALL';
+  const hasActiveFilters =
+    searchQuery !== '' || statusFilter !== 'ALL' || schemeFilter !== 'ALL' || assigneeFilter !== 'ALL';
 
   const resetFilters = () => {
     onSearchChange('');
@@ -72,117 +70,143 @@ export const FilterBar: React.FC<FilterBarProps> = ({
   };
 
   return (
-    <div className="h-auto md:h-16 border border-slate-200 rounded-t-2xl flex flex-col md:flex-row items-center px-4 py-3 md:py-0 justify-between bg-slate-50 shrink-0 mb-[-1px] relative z-10 gap-4 md:gap-0">
-      <div className="flex flex-wrap md:flex-nowrap items-center gap-4 w-full md:w-auto">
-        {/* Search Input */}
-        <div className="relative flex-1 md:flex-none">
+    <div className="bg-white border border-slate-200/80 rounded-xl p-3 mb-4 shadow-2xs space-y-3">
+      {/* Top Controls Row */}
+      <div className="flex flex-col lg:flex-row items-stretch lg:items-center justify-between gap-3">
+        {/* Left: Search input */}
+        <div className="relative flex-1 max-w-md">
           <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
           <input
             type="text"
             value={searchQuery}
             onChange={(e) => onSearchChange(e.target.value)}
-            placeholder="Search references..."
-            className="pl-9 pr-4 py-1.5 text-sm border border-slate-200 rounded-md bg-white focus:outline-none focus:ring-1 focus:ring-indigo-500 w-full md:w-64"
+            placeholder="Search by reference, product, model, or officer..."
+            className="w-full pl-9 pr-8 py-1.5 text-xs bg-slate-50 border border-slate-200/80 rounded-lg text-slate-800 placeholder-slate-400 focus:outline-none focus:ring-1 focus:ring-slate-900 focus:bg-white transition-all font-sans"
           />
           {searchQuery && (
             <button
               onClick={() => onSearchChange('')}
-              className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
+              className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 p-0.5"
             >
               <X className="w-3.5 h-3.5" />
             </button>
           )}
         </div>
 
-        <div className="hidden md:block h-6 w-px bg-slate-300"></div>
-
-        {/* Scheme Dropdown */}
-        <select
-          value={schemeFilter}
-          onChange={(e) => onSchemeFilterChange(e.target.value)}
-          className="text-sm border border-slate-200 rounded-md bg-white py-1.5 pl-3 pr-8 focus:outline-none focus:ring-1 focus:ring-indigo-500 appearance-none min-w-[140px]"
-        >
-          <option value="ALL">All Schemes</option>
-          {schemes.map((s) => (
-            <option key={s} value={s}>{s}</option>
-          ))}
-        </select>
-
-        {/* Assignee Filter */}
-        <select
-          value={assigneeFilter}
-          onChange={(e) => onAssigneeFilterChange(e.target.value)}
-          className={`text-sm border rounded-md py-1.5 pl-3 pr-8 focus:outline-none focus:ring-1 focus:ring-indigo-500 appearance-none min-w-[140px] font-medium transition-colors ${
-            assigneeFilter === 'ME'
-              ? 'bg-indigo-50 border-indigo-300 text-indigo-800'
-              : 'bg-white border-slate-200 text-slate-800'
-          }`}
-        >
-          <option value="ALL">All Assignees</option>
-          {currentUserEmail && (
-            <option value="ME">👤 Assigned to Me ({currentUserEmail.split('@')[0]})</option>
-          )}
-          <option value="APPLICANT">Pending Applicant (Cytron)</option>
-          <option value="SIRIM">Pending SIRIM QAS</option>
-          <option value="LAB">Pending Lab</option>
-        </select>
-      </div>
-
-      <div className="flex items-center gap-2 self-end md:self-auto w-full md:w-auto justify-end">
-        <div className="flex items-center bg-white p-0.5 rounded-md border border-slate-200 mr-2">
-          <button
-            onClick={() => onViewModeChange('grid')}
-            className={`p-1 rounded text-xs font-medium transition-colors ${
-              viewMode === 'grid'
-                ? 'bg-indigo-50 text-indigo-700 shadow-sm'
-                : 'text-slate-400 hover:text-slate-700'
-            }`}
-            title="Card Grid View"
-          >
-            <LayoutGrid className="w-4 h-4" />
-          </button>
-          <button
-            onClick={() => onViewModeChange('table')}
-            className={`p-1 rounded text-xs font-medium transition-colors ${
-              viewMode === 'table'
-                ? 'bg-indigo-50 text-indigo-700 shadow-sm'
-                : 'text-slate-400 hover:text-slate-700'
-            }`}
-            title="Operational Table View"
-          >
-            <List className="w-4 h-4" />
-          </button>
+        {/* Center: Segmented Status Filter Tabs */}
+        <div className="inline-flex p-1 bg-slate-100 rounded-lg text-xs font-medium self-start lg:self-auto overflow-x-auto max-w-full">
+          {statusTabs.map((tab) => {
+            const isActive = statusFilter === tab.id;
+            return (
+              <button
+                key={tab.id}
+                onClick={() => onStatusFilterChange(tab.id)}
+                className={`flex items-center gap-1.5 px-3 py-1 rounded-md transition-all whitespace-nowrap ${
+                  isActive
+                    ? 'bg-white text-slate-900 shadow-2xs font-semibold'
+                    : 'text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                {tab.dot && <span className={`w-1.5 h-1.5 rounded-full ${tab.dot}`} />}
+                <span>{tab.label}</span>
+              </button>
+            );
+          })}
         </div>
 
-        {onExportCsv && (
-          <button
-            onClick={onExportCsv}
-            className="flex items-center gap-1 px-2.5 py-1 text-xs font-semibold text-slate-700 hover:text-slate-900 bg-white hover:bg-slate-100 border border-slate-300 rounded-md transition-colors shrink-0 shadow-2xs cursor-pointer"
-            title="Export applications to CSV spreadsheet"
+        {/* Right: Scheme, Assignee, View Switcher & Export */}
+        <div className="flex items-center gap-2 flex-wrap sm:flex-nowrap justify-between lg:justify-end">
+          {/* Scheme Dropdown */}
+          <select
+            value={schemeFilter}
+            onChange={(e) => onSchemeFilterChange(e.target.value)}
+            className="text-xs bg-slate-50 border border-slate-200/80 text-slate-700 rounded-lg py-1.5 pl-2.5 pr-7 focus:outline-none focus:ring-1 focus:ring-slate-900 transition-colors cursor-pointer"
           >
-            <Download className="w-3.5 h-3.5 text-slate-600" />
-            <span className="hidden sm:inline">Export CSV</span>
-          </button>
-        )}
+            <option value="ALL">All Schemes</option>
+            {schemes.map((s) => (
+              <option key={s} value={s}>
+                {s.replace(' (MCMC/SIRIM)', '').replace(' (MS Standards)', '')}
+              </option>
+            ))}
+          </select>
 
+          {/* Assignee Filter */}
+          <select
+            value={assigneeFilter}
+            onChange={(e) => onAssigneeFilterChange(e.target.value)}
+            className={`text-xs border rounded-lg py-1.5 pl-2.5 pr-7 focus:outline-none focus:ring-1 focus:ring-slate-900 transition-colors cursor-pointer ${
+              assigneeFilter === 'ME'
+                ? 'bg-indigo-50 border-indigo-200 text-indigo-900 font-semibold'
+                : 'bg-slate-50 border-slate-200/80 text-slate-700'
+            }`}
+          >
+            <option value="ALL">All Assignees</option>
+            {currentUserEmail && (
+              <option value="ME">👤 Assigned to Me</option>
+            )}
+            <option value="APPLICANT">Pending Cytron</option>
+            <option value="SIRIM">Pending SIRIM QAS</option>
+            <option value="LAB">Pending Lab</option>
+          </select>
+
+          {/* View Mode Toggle */}
+          <div className="inline-flex p-0.5 bg-slate-100 rounded-lg border border-slate-200/80">
+            <button
+              onClick={() => onViewModeChange('grid')}
+              className={`p-1.5 rounded-md transition-colors ${
+                viewMode === 'grid'
+                  ? 'bg-white text-slate-900 shadow-2xs'
+                  : 'text-slate-400 hover:text-slate-700'
+              }`}
+              title="Grid Cards"
+            >
+              <LayoutGrid className="w-3.5 h-3.5" />
+            </button>
+            <button
+              onClick={() => onViewModeChange('table')}
+              className={`p-1.5 rounded-md transition-colors ${
+                viewMode === 'table'
+                  ? 'bg-white text-slate-900 shadow-2xs'
+                  : 'text-slate-400 hover:text-slate-700'
+              }`}
+              title="Table View"
+            >
+              <List className="w-3.5 h-3.5" />
+            </button>
+          </div>
+
+          {onExportCsv && (
+            <button
+              onClick={onExportCsv}
+              className="p-1.5 text-slate-500 hover:text-slate-900 bg-slate-50 hover:bg-slate-100 border border-slate-200/80 rounded-lg transition-colors"
+              title="Export filtered records to CSV"
+            >
+              <Download className="w-3.5 h-3.5" />
+            </button>
+          )}
+
+          {hasActiveFilters && (
+            <button
+              onClick={resetFilters}
+              className="text-xs text-slate-500 hover:text-slate-900 font-medium underline px-1 cursor-pointer"
+            >
+              Reset
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* Filter Status Bar Summary */}
+      <div className="flex items-center justify-between text-[11px] text-slate-400 pt-1 border-t border-slate-100">
+        <span className="font-mono tabular-nums">
+          Showing <strong className="text-slate-700 font-semibold">{totalFilteredCount}</strong> of{' '}
+          <strong className="text-slate-700 font-semibold">{totalAppsCount}</strong> applications
+        </span>
         {hasActiveFilters && (
-          <button
-            onClick={resetFilters}
-            className="text-xs text-slate-500 hover:text-slate-800 underline font-medium cursor-pointer"
-          >
-            Reset
-          </button>
-        )}
-
-        {totalAppsCount > 0 && onClearAll && (
-          <button
-            onClick={onClearAll}
-            className="flex items-center gap-1 px-2.5 py-1 text-xs font-semibold text-rose-600 hover:text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 rounded-md transition-colors shrink-0 shadow-2xs"
-            title="Clear all applications from tracker"
-          >
-            <Trash2 className="w-3.5 h-3.5" />
-            <span>Clear All</span>
-          </button>
+          <span className="text-slate-500 flex items-center gap-1">
+            <Filter className="w-3 h-3 text-slate-400" />
+            Filtered active
+          </span>
         )}
       </div>
     </div>
