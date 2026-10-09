@@ -85,15 +85,25 @@ export function isPendingStatement(item?: Partial<ActionItem> | null): boolean {
  * Returns a copy of the item whose itemCategory, assignedTo and requiredActionType all agree with each other.
  * Use this on every action item coming from the AI, the heuristic parser, manual entry or storage.
  */
+// "Waiting for SIRIM agent / consultant …" is the SIRIM side, even when the AI tagged it as a supplier.
+function mentionsSirimSide(item: Partial<ActionItem>): boolean {
+  const text = `${item.title || ''} ${item.description || ''}`.toLowerCase();
+  const sirimSide = /\b(sirim|agent|consultant|officer|e-?comm|mcmc)\b/.test(text);
+  const supplierSide = /\b(supplier|factory|vendor|manufacturer|oem|odm)\b/.test(text);
+  return sirimSide && !supplierSide;
+}
+
 export function normalizeActionItem<T extends Partial<ActionItem>>(item: T): T {
   if (!item) return item;
   if (isPendingStatement(item)) {
-    const assignedTo: ActionAssignee = isExternalParty(item.assignedTo)
+    let assignedTo: ActionAssignee = isExternalParty(item.assignedTo)
       ? (item.assignedTo as ActionAssignee)
       : partyForWaitingType(item.requiredActionType);
-    const requiredActionType: ActionItemType = isWaitingActionType(item.requiredActionType)
-      ? (item.requiredActionType as ActionItemType)
-      : waitingTypeForParty(assignedTo);
+    if (assignedTo === 'SUPPLIER' && mentionsSirimSide(item)) assignedTo = 'SIRIM';
+    const requiredActionType: ActionItemType =
+      isWaitingActionType(item.requiredActionType) && !(item.requiredActionType === 'WAITING_SUPPLIER' && assignedTo !== 'SUPPLIER')
+        ? (item.requiredActionType as ActionItemType)
+        : waitingTypeForParty(assignedTo);
     return { ...item, itemCategory: 'PENDING_STATEMENT', assignedTo, requiredActionType };
   }
   return {

@@ -3,6 +3,7 @@
  * Google Sheet rows and the daily Telegram briefing. No I/O here, so it can be tested directly.
  */
 import { isPendingStatement, normalizeActionItem } from "./src/utils/actionItemUtils";
+import { cleanApplicationRef } from "./src/utils/reference";
 
 const MYT = "Asia/Kuala_Lumpur";
 
@@ -142,8 +143,9 @@ export function hasTrustedParticipant(participants: string[], trustedSenders: st
 // Matching threads to applications
 // ---------------------------------------------------------------------------
 
+/** True when this isn't a real SIRIM reference (empty, generated, placeholder or a name). */
 export function isGeneratedRef(ref?: string | null): boolean {
-  return !ref || /^SQAS\/GEN\//i.test(ref) || /^th_/.test(ref);
+  return !cleanApplicationRef(ref);
 }
 
 export function normalizeModel(model?: string | null): string {

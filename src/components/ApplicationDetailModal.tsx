@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { displayApplicationRef } from '../utils/reference';
 import {
   X,
   ShieldCheck,
@@ -618,7 +619,7 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({
                 {statusInfo.label}
               </span>
               <span className="font-mono text-xs font-semibold text-slate-300 bg-slate-800 px-2 py-0.5 rounded border border-slate-700">
-                {application.applicationRef}
+                {displayApplicationRef(application.applicationRef)}
               </span>
             </div>
             <h2 className="text-lg sm:text-xl font-bold text-white tracking-tight truncate">

@@ -1,4 +1,5 @@
 import React from 'react';
+import { displayApplicationRef } from '../utils/reference';
 import {
   FileCheck,
   Clock,
@@ -81,7 +82,7 @@ export const ApplicationTable: React.FC<ApplicationTableProps> = ({
                   {/* 1. Ref & Status */}
                   <td className="py-3 px-4 space-y-1">
                     <div className="flex items-center gap-1.5 font-mono font-semibold text-slate-800 group-hover:text-indigo-600 transition-colors">
-                      <span>{app.applicationRef}</span>
+                      <span>{displayApplicationRef(app.applicationRef)}</span>
                       <button
                         onClick={(e) => handleCopy(e, app.id, app.applicationRef)}
                         className="text-slate-400 hover:text-slate-700 opacity-0 group-hover:opacity-100 transition-opacity p-0.5"

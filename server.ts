@@ -3528,6 +3528,10 @@ CRITICAL INSTRUCTION - MAIN THREAD (MESSAGE 1) vs REPLIES (MESSAGE 2+):
 2. THE LATEST MESSAGE (MESSAGE N) determines current 'status', 'statusExplanation', and pending 'actionItems'.
 
 ${ACTION_DIRECTION_RULES}
+${ctx.trustedSenders.length ? `
+KNOWN SIRIM AGENTS / CONSULTANTS (always the SIRIM side: assignedTo 'SIRIM', never 'SUPPLIER'): ${ctx.trustedSenders.join(", ")}
+` : ""}
+REFERENCE NUMBER RULE: 'applicationRef' must be an actual reference / job / application number copied from the emails (e.g. "SQAS/CMCS/2026/0012", "678371"). Never put a product name, model, "N/A", "pending" or similar there. If the emails contain no reference number, return an empty string.
 
 EXISTING OPEN ITEMS (use exact titles in resolvedRequirements when the thread shows they are done / answered):
 ${JSON.stringify((knownApp?.actionItems || []).filter((a: any) => !a.isCompleted).map((a: any) => ({ title: a.title, category: a.itemCategory, assignedTo: a.assignedTo, type: a.requiredActionType })))}
@@ -3796,8 +3800,8 @@ isSirimRelated (boolean), applicationRef (string), productName (string), modelNu
         threadIds: Array.from(new Set([...appThreadIds(existing), threadId])),
         threadId: existing.threadId || threadId,
         applicationRef:
-          isGeneratedRef(existing.applicationRef) && parsed.applicationRef && !isGeneratedRef(parsed.applicationRef)
-            ? parsed.applicationRef
+          isGeneratedRef(existing.applicationRef)
+            ? (isGeneratedRef(parsed.applicationRef) ? "" : String(parsed.applicationRef).trim())
             : existing.applicationRef,
         modelNumber: normalizeModel(existing.modelNumber) ? existing.modelNumber : parsed.modelNumber || existing.modelNumber,
         productName: existing.productName || parsed.productName,
@@ -3828,13 +3832,13 @@ isSirimRelated (boolean), applicationRef (string), productName (string), modelNu
       return { ...result, applications: copy, updated: true };
     }
 
-    const refFromAi = parsed.applicationRef && !isGeneratedRef(parsed.applicationRef) ? parsed.applicationRef : "";
+    const refFromAi = isGeneratedRef(parsed.applicationRef) ? "" : String(parsed.applicationRef).trim();
     copy.unshift({
       // Fresh id per creation, so a rebuilt application never collides with an old deleted one.
       id: `app-${threadId}-${Date.now().toString(36)}`,
       threadId,
       threadIds: [threadId],
-      applicationRef: refFromAi || `SQAS/GEN/${threadId.slice(-6).toUpperCase()}`,
+      applicationRef: refFromAi,
       productName: parsed.productName || subject,
       modelNumber: parsed.modelNumber || "",
       brand: parsed.brand || "Cytron",

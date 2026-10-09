@@ -1,4 +1,5 @@
 import React from 'react';
+import { displayApplicationRef } from '../utils/reference';
 import {
   Clock,
   User,
@@ -82,7 +83,7 @@ export const ApplicationCard: React.FC<ApplicationCardProps> = ({
         {/* Top: Ref No & Status Dot */}
         <div className="flex items-center justify-between text-xs">
           <div className="flex items-center gap-1.5 font-mono text-slate-600">
-            <span className="font-semibold text-slate-800">{application.applicationRef}</span>
+            <span className="font-semibold text-slate-800">{displayApplicationRef(application.applicationRef)}</span>
             <button
               onClick={copyRef}
               className="text-slate-400 hover:text-slate-700 p-0.5 rounded transition-colors"
