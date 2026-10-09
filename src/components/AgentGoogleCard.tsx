@@ -105,6 +105,39 @@ export const AgentGoogleCard: React.FC<{
       </div>
       {error && <p className="text-xs text-rose-600">{error}</p>}
 
+      {ag?.connected && (
+        <div className="border-t border-slate-100 pt-3">
+          <p className="text-xs font-semibold text-slate-700">Start fresh from Gmail</p>
+          <p className="text-[11px] text-slate-500 mb-1.5">
+            Clears the current applications (a backup is kept on the server) and rebuilds them all from the inbox with the
+            latest agent logic. Use this once after an upgrade. Manual notes and ticks on the old records are not kept.
+          </p>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={async () => {
+              if (!window.confirm('Rebuild every application from Gmail? The current list is backed up and replaced.')) return;
+              setBusy(true);
+              setError(null);
+              try {
+                await safeFetchJson('/api/automation/rebuild-from-gmail', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ confirm: true }),
+                });
+                window.location.reload();
+              } catch (e: any) {
+                setError(e?.message || 'Could not start the rebuild.');
+                setBusy(false);
+              }
+            }}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-rose-300 px-3 py-1.5 text-xs font-semibold text-rose-700 hover:bg-rose-50 disabled:opacity-50"
+          >
+            Start fresh from Gmail
+          </button>
+        </div>
+      )}
+
       {scan && (scan.remaining > 0 || scan.lastSuccessfulScanAt) && (
         <div className="text-xs text-slate-600 border-t border-slate-100 pt-3">
           {scan.remaining > 0 ? (

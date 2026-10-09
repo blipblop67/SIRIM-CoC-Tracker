@@ -684,12 +684,20 @@ async function startServer() {
     return [];
   }
 
-  function recordDeletedApplications(apps: any[], deletedBy?: string) {
+  /**
+   * idOnly: only that exact record is blocked (used by "Start fresh from Gmail", so old browser copies
+   * can't come back but the same email threads can be read again into new applications).
+   */
+  function recordDeletedApplications(apps: any[], deletedBy?: string, idOnly = false) {
     const list = getDeletedApplications();
     const now = new Date().toISOString();
     for (const a of apps) {
       if (!a) continue;
-      list.push({ id: a.id, applicationRef: a.applicationRef, threadId: a.threadId, deletedAt: now, deletedBy });
+      list.push(
+        idOnly
+          ? { id: a.id, deletedAt: now, deletedBy }
+          : { id: a.id, applicationRef: a.applicationRef, threadId: a.threadId, deletedAt: now, deletedBy }
+      );
     }
     try {
       writeJsonAtomic(DELETED_FILE, list.slice(-2000));
@@ -1363,7 +1371,7 @@ Open Items: ${JSON.stringify((existingApplication.actionItems || []).filter((a: 
 
 OUTPUT RULES:
 1. Determine if this email/thread is related to SIRIM QAS / e-ComM / MCMC / CIDB / CoC / Type Approval / Safety approval.
-2. Extract the Application Reference No / Job No (e.g. SQAS/CMCS/2026/..., eComM Ref, etc.). If none found, generate a plausible reference based on the subject.
+2. Extract the Application Reference No / Job No (e.g. SQAS/CMCS/2026/..., eComM Ref, etc.). If no reference number appears in the emails, leave 'applicationRef' empty. Never invent one.
 3. Extract Product Name, Model Number, Brand, Applicant company name (e.g. Cytron Technologies Sdn Bhd).
 4. Identify Certification Scheme ('Type Approval (MCMC/SIRIM)', 'Special Approval', 'Modular Approval', 'CIDB Certification', 'Safety & EMC (MS Standards)').
 5. Identify current status based on the CRITICAL STATUS CLASSIFICATION RULES above.
@@ -3822,7 +3830,8 @@ isSirimRelated (boolean), applicationRef (string), productName (string), modelNu
 
     const refFromAi = parsed.applicationRef && !isGeneratedRef(parsed.applicationRef) ? parsed.applicationRef : "";
     copy.unshift({
-      id: `sirim-${threadId}`,
+      // Fresh id per creation, so a rebuilt application never collides with an old deleted one.
+      id: `app-${threadId}-${Date.now().toString(36)}`,
       threadId,
       threadIds: [threadId],
       applicationRef: refFromAi || `SQAS/GEN/${threadId.slice(-6).toUpperCase()}`,
@@ -4315,6 +4324,34 @@ isSirimRelated (boolean), applicationRef (string), productName (string), modelNu
   // ----------------------------------------------------
   // Reset First-Time Scan Flag (Re-run 1-Year Historical Scan)
   // ----------------------------------------------------
+  // "Start fresh from Gmail": back up and clear the applications, then rebuild them all from the inbox
+  // with the current agent logic. Earlier manual deletions still apply.
+  app.post("/api/automation/rebuild-from-gmail", (req: Request, res: Response) => {
+    try {
+      if (req.body?.confirm !== true) return res.status(400).json({ error: "Send confirm: true to rebuild." });
+      const userEmail = req.user?.email || "team-member";
+      const current = getStoredApplications();
+      backupApplicationsStore("rebuild");
+      recordDeletedApplications(current, userEmail, true);
+      saveStoredApplications([]);
+      const config = getStoredAutomationConfig();
+      config.hasCompletedFirstScan = false;
+      delete config.firstScanCompletedAt;
+      config.scanState = { queue: [], attempts: {} };
+      config.alertedCriticalItemIds = [];
+      saveStoredAutomationConfig(config);
+      recordTeamActivity({
+        userEmail,
+        actionType: "APP_DELETED",
+        description: `${userEmail.split("@")[0]} started a fresh rebuild from Gmail (${current.length} old applications backed up in data/backups).`,
+      });
+      triggerAutonomousRunSafely("REBUILD_FROM_GMAIL", userEmail);
+      res.json({ success: true, backedUp: current.length });
+    } catch (e: any) {
+      res.status(500).json({ error: "Could not start the rebuild", details: e?.message });
+    }
+  });
+
   app.post("/api/automation/reset-first-scan", (req: Request, res: Response) => {
     try {
       const config = getStoredAutomationConfig();
