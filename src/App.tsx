@@ -346,6 +346,20 @@ export default function App() {
     return () => unsubscribe();
   }, []);
 
+  // Coming back from "Connect Google" for the agent
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const result = params.get('agentGoogle');
+    if (!result) return;
+    setSyncFeedback(
+      result === 'connected'
+        ? { type: 'success', message: 'Agent connected to Google. It is now reading your SIRIM emails in the background.' }
+        : { type: 'error', message: `Could not connect the agent to Google: ${params.get('reason') || 'unknown error'}` }
+    );
+    window.history.replaceState({}, '', window.location.pathname);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // 4. Filter & Search State
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState('ALL');
@@ -694,14 +708,12 @@ export default function App() {
           applications: applications,
           userEmail: authSession?.email || 'team-member@cytron.io',
           telegramConfig: automationConfig.telegram,
-          scanQuery: 'from:sirim.my OR subject:ecomm OR subject:sqas OR subject:sirim',
           isManualClick: isManual,
           triggerSource: isManual ? 'MANUAL_CLICK' : 'AUTONOMOUS_CYCLE',
           options: {
             autoScanGmail: automationConfig.autoScanGmail && Boolean(authSession?.accessToken),
             autoSyncSheet: automationConfig.autoSyncGoogleSheet && Boolean(sheetConfig?.spreadsheetId),
             autoSendTelegram: isManual && automationConfig.autoSendTelegram && Boolean(automationConfig.telegram?.botToken && automationConfig.telegram?.chatId),
-            scanQuery: 'from:sirim.my OR subject:ecomm OR subject:sqas OR subject:sirim',
           },
         }),
       });

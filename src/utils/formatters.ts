@@ -50,7 +50,7 @@ export function getStatusBadgeInfo(status: SirimStatus): {
       };
     case 'RFI_ACTION_REQUIRED':
       return {
-        label: 'RFI / Action Required',
+        label: 'Action Pending',
         bg: 'bg-rose-50',
         text: 'text-rose-700',
         border: 'border-rose-300',

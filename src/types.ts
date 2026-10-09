@@ -289,6 +289,12 @@ export interface AutomationConfig {
     updatedAt?: string;
   } | null;
   sheetConfig?: SheetSyncConfig | null;
+  // SIRIM agent / consultant addresses or domains that count as the SIRIM side (comma-separated)
+  trustedSenders?: string;
+  // Read-only, filled in by the server
+  agentGoogle?: { connected: boolean; email?: string; connectedAt?: string; needsReconnect?: boolean; lastError?: string | null };
+  agentGoogleAvailable?: boolean;
+  scanState?: { mode?: 'FIRST_SCAN' | 'ROUTINE'; total: number; processed: number; remaining: number; lastSuccessfulScanAt?: string };
 }
 
 export interface UserPresence {

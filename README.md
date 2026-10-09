@@ -129,6 +129,18 @@ ALLOWED_EMAIL_DOMAINS="cytron.io"
 ALLOWED_EMAILS=""
 ```
 Every `/api` request now needs a signed-in Google account from an allowed domain, so the tracker is safe to expose beyond the office LAN.
+
+#### Connect the agent to Google (needed for the daily 08:30 run)
+Browser sign-ins only last about an hour, so the daily run needs its own long-lived Google connection:
+1. Google Cloud Console → *APIs & Services* → *Credentials* → open the OAuth client named "Web client (auto created by Google Service)" for this Firebase project.
+2. Copy its **Client secret** into `.env` as `GOOGLE_OAUTH_CLIENT_SECRET`, and add `https://<your tracker address>/api/automation/google/callback` under **Authorized redirect URIs**. Set `APP_URL` to that same address.
+3. Restart the server, open the tracker → **Automation** → **Connect Google**, and sign in with the inbox that receives the SIRIM emails.
+
+#### What the agent does
+- **First run:** lists every SIRIM-related thread from the past year (SIRIM/MCMC addresses, your SIRIM agent addresses, and SIRIM/e-ComM/CoC/Type Approval subjects) and reads them all, in batches, in the background. Progress shows under Automation settings.
+- **Every day at the scheduled time (default 08:30 MYT):** reads threads with new emails since the last scan, updates applications, rewrites the Google Sheet, and sends the Telegram briefing (what changed, what Cytron must do, what we're waiting on).
+- Several threads about one application (SIRIM, agent, supplier) are combined into one application, matched by reference number or model number.
+- Between briefings, a new **critical** Cytron task triggers one instant Telegram alert (if enabled).
 *(Press `Ctrl + O` then `Enter` to save, and `Ctrl + X` to exit nano)*.
 
 ---

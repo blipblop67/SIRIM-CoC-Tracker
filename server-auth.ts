@@ -80,7 +80,8 @@ export async function getAccessTokenEmail(accessToken: string): Promise<string |
 }
 
 // Routes that must work without signing in.
-const PUBLIC_API_PATHS = new Set(["/api/health"]);
+// The Google callback is protected by its own one-time `state` value instead (see server.ts).
+const PUBLIC_API_PATHS = new Set(["/api/health", "/api/automation/google/callback"]);
 
 declare global {
   // eslint-disable-next-line @typescript-eslint/no-namespace

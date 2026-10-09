@@ -14,7 +14,26 @@ import {
   GMAIL_OOO_EXCLUSION_QUERY,
 } from "./src/utils/outOfOffice";
 import { normalizeActionItem } from "./src/utils/actionItemUtils";
-import { requireApiAuth, getAccessTokenEmail } from "./server-auth";
+import { requireApiAuth, getAccessTokenEmail, isAllowedEmail } from "./server-auth";
+import crypto from "crypto";
+import firebaseAppConfig from "./firebase-applet-config.json";
+import {
+  toMytDate,
+  todayMyt,
+  buildScanQuery,
+  parseTrustedSenders,
+  hasTrustedParticipant,
+  findAppByThread,
+  findAppByParsedDetails,
+  appThreadIds,
+  isGeneratedRef,
+  normalizeModel,
+  buildSheetRows,
+  formatDailyBriefing,
+  formatAppAlert,
+  splitTelegramMessage,
+  statusLabel,
+} from "./server-agent-utils";
 
 // Secrets never leave the server. The UI gets this placeholder instead of the real Telegram bot token
 // and sends it back unchanged when the token was not edited.
@@ -521,7 +540,7 @@ function fallbackHeuristicSirimParser(emailSubject: string, emailBody: string, s
       const matchHeader = chunk.match(/\[([^\]]+) \(([^\)]+)\)\]:/) || chunk.match(/FROM:\s*([^\n]+)[\s\S]*?DATE:\s*([^\n]+)/i);
       const chunkSender = matchHeader ? matchHeader[1].trim() : sender || "SIRIM QAS";
       const chunkDate = matchHeader ? matchHeader[2].trim() : date;
-      const parsedDate = chunkDate ? new Date(chunkDate).toISOString().split("T")[0] : new Date().toISOString().split("T")[0];
+      const parsedDate = toMytDate(chunkDate) || todayMyt();
       const chunkSnippet = chunk.replace(/\[[^\]]+ \([^\)]+\)\]:\s*/, "").slice(0, 150).trim();
 
       let evtType = "document";
@@ -554,7 +573,7 @@ function fallbackHeuristicSirimParser(emailSubject: string, emailBody: string, s
 
   if (timelineEvents.length === 0) {
     timelineEvents.push({
-      date: date ? date.split("T")[0] : new Date().toISOString().split("T")[0],
+      date: toMytDate(date) || todayMyt(),
       title: `SIRIM Communication: ${cleanSubject.slice(0, 50)}`,
       description: `Ingested email communication regarding ${applicationRef} (${status}).`,
       sender: sender || "SIRIM QAS",
@@ -578,7 +597,7 @@ function fallbackHeuristicSirimParser(emailSubject: string, emailBody: string, s
     supplierName,
     supplierEmail,
     supplierStatus,
-    submissionDate: date ? date.split("T")[0] : new Date().toISOString().split("T")[0],
+    submissionDate: toMytDate(date) || todayMyt(),
     lastActivityDate: new Date().toISOString().split("T")[0],
     targetDeadline: new Date(Date.now() + 7 * 86400000).toISOString().split("T")[0],
     certificateNo,
@@ -757,9 +776,22 @@ async function startServer() {
     telegram.botToken = hasBotToken ? BOT_TOKEN_MASK : "";
     if (!telegram.chatId && process.env.TELEGRAM_CHAT_ID) telegram.chatId = process.env.TELEGRAM_CHAT_ID;
     if (!telegram.topicId && process.env.TELEGRAM_TOPIC_ID) telegram.topicId = process.env.TELEGRAM_TOPIC_ID;
+    const ag = rest.agentGoogle;
+    const scan = rest.scanState || {};
     return {
       ...rest,
       telegram,
+      agentGoogle: ag?.refreshToken
+        ? { connected: true, email: ag.email, connectedAt: ag.connectedAt, needsReconnect: Boolean(ag.needsReconnect), lastError: ag.lastError || null }
+        : { connected: false },
+      agentGoogleAvailable: agentOAuthConfigured(),
+      scanState: {
+        mode: scan.mode,
+        total: scan.total || 0,
+        processed: scan.processed || 0,
+        remaining: Array.isArray(scan.queue) ? scan.queue.length : 0,
+        lastSuccessfulScanAt: scan.lastSuccessfulScanAt,
+      },
       activeSession: activeSession
         ? {
             email: activeSession.email,
@@ -777,6 +809,95 @@ async function startServer() {
   function resolveBotToken(requestToken?: string): string {
     if (!isMaskedOrEmpty(requestToken)) return String(requestToken).trim();
     return (getStoredAutomationConfig().telegram?.botToken || process.env.TELEGRAM_BOT_TOKEN || "").trim();
+  }
+
+  // ----------------------------------------------------
+  // Agent Google connection (long-lived "offline" access)
+  // Google sign-in tokens in the browser last ~1 hour, so on their own the 08:30 daily run can't reach
+  // Gmail or the Sheet. Connecting the agent once stores a refresh token on the server (never sent to
+  // browsers) from which a fresh access token is made for every run.
+  // Needs GOOGLE_OAUTH_CLIENT_SECRET (and optionally GOOGLE_OAUTH_CLIENT_ID) in .env.
+  // ----------------------------------------------------
+  const AGENT_GOOGLE_SCOPES = [
+    "openid",
+    "email",
+    "https://www.googleapis.com/auth/gmail.readonly",
+    "https://www.googleapis.com/auth/spreadsheets",
+  ];
+  const agentOAuthStates = new Map<string, { email: string; redirectUri: string; expiresAt: number }>();
+  let agentTokenCache: { token: string; expiresAt: number; email: string } | null = null;
+  // Fallback when no agent account is connected: lets a big scan started by a user keep going in the
+  // background with that user's (short-lived) token.
+  let backlogUserToken: { token: string; expiresAt: number } | null = null;
+
+  function agentOAuthClientId(): string {
+    return process.env.GOOGLE_OAUTH_CLIENT_ID || (firebaseAppConfig as any).oAuthClientId || "";
+  }
+  function agentOAuthConfigured(): boolean {
+    return Boolean(agentOAuthClientId() && process.env.GOOGLE_OAUTH_CLIENT_SECRET);
+  }
+  function makeAgentOAuthClient(redirectUri?: string) {
+    return new google.auth.OAuth2(agentOAuthClientId(), process.env.GOOGLE_OAUTH_CLIENT_SECRET, redirectUri);
+  }
+  function agentRedirectUri(req: Request): string {
+    const envUrl = process.env.APP_URL && !process.env.APP_URL.includes("MY_APP_URL") ? process.env.APP_URL.replace(/\/$/, "") : "";
+    const base = envUrl || `${req.protocol}://${req.get("host")}`;
+    return `${base}/api/automation/google/callback`;
+  }
+
+  async function getAgentAccessToken(): Promise<{ token: string; email: string } | null> {
+    const cfg = getStoredAutomationConfig();
+    const ag = cfg.agentGoogle;
+    if (!ag?.refreshToken || !agentOAuthConfigured()) return null;
+    if (agentTokenCache && agentTokenCache.email === ag.email && Date.now() < agentTokenCache.expiresAt - 60000) {
+      return { token: agentTokenCache.token, email: ag.email };
+    }
+    try {
+      const client = makeAgentOAuthClient();
+      client.setCredentials({ refresh_token: ag.refreshToken });
+      const { token } = await client.getAccessToken();
+      if (!token) throw new Error("Google returned no access token");
+      agentTokenCache = { token, expiresAt: client.credentials.expiry_date || Date.now() + 50 * 60 * 1000, email: ag.email };
+      if (ag.lastError || ag.needsReconnect) {
+        const latest = getStoredAutomationConfig();
+        latest.agentGoogle = { ...latest.agentGoogle, lastError: null, needsReconnect: false };
+        saveStoredAutomationConfig(latest);
+      }
+      return { token, email: ag.email };
+    } catch (err: any) {
+      const msg = String(err?.response?.data?.error_description || err?.response?.data?.error || err?.message || err);
+      const latest = getStoredAutomationConfig();
+      if (latest.agentGoogle) {
+        latest.agentGoogle = {
+          ...latest.agentGoogle,
+          lastError: msg,
+          lastErrorAt: new Date().toISOString(),
+          needsReconnect: /invalid_grant|revoked|expired/i.test(msg),
+        };
+        saveStoredAutomationConfig(latest);
+      }
+      return null;
+    }
+  }
+
+  /** Replaces the whole tab with the current applications (so deleted ones disappear). */
+  async function writeApplicationsToSheet(accessToken: string, spreadsheetId: string, sheetName: string, apps: any[]) {
+    const auth = new google.auth.OAuth2();
+    auth.setCredentials({ access_token: accessToken });
+    const sheets = google.sheets({ version: "v4", auth });
+    const quoted = `'${sheetName.replace(/'/g, "''")}'`;
+    const meta = await sheets.spreadsheets.get({ spreadsheetId, fields: "sheets.properties.title" });
+    if (!(meta.data.sheets || []).some((sh: any) => sh.properties?.title === sheetName)) {
+      await sheets.spreadsheets.batchUpdate({ spreadsheetId, requestBody: { requests: [{ addSheet: { properties: { title: sheetName } } }] } });
+    }
+    await sheets.spreadsheets.values.clear({ spreadsheetId, range: quoted });
+    await sheets.spreadsheets.values.update({
+      spreadsheetId,
+      range: `${quoted}!A1`,
+      // RAW: text from emails is never interpreted as a formula.
+      valueInputOption: "RAW",
+      requestBody: { values: buildSheetRows(apps) },
+    });
   }
 
   function getStoredApplications(): any[] {
@@ -2014,98 +2135,7 @@ Evaluate thoroughly and return a JSON matching the schema.`;
         saveStoredApplications(appsToSync);
       }
 
-      const oauth2Client = new google.auth.OAuth2();
-      oauth2Client.setCredentials({ access_token: accessToken });
-
-      const sheets = google.sheets({ version: "v4", auth: oauth2Client });
-
-      const headers = [
-        "Application Ref No",
-        "Product Name",
-        "Model Number",
-        "Brand",
-        "Certification Scheme",
-        "Status",
-        "Assigned SIRIM Officer",
-        "Officer Email",
-        "Email Subject / Thread Name",
-        "Gmail Thread Link",
-        "Submission Date",
-        "Last Activity",
-        "Target SLA Deadline",
-        "Pending Action Items",
-        "Action Assignee",
-        "Priority",
-        "Certificate No",
-        "Certificate Expiry",
-        "Fee (RM)",
-        "Payment Status",
-        "Notes / Summary",
-        "Last Synced (UTC)",
-      ];
-
-      const rowsData: any[][] = [headers];
-
-      appsToSync.forEach((appItem: any) => {
-        const pendingActions = (appItem.actionItems || [])
-          .filter((a: any) => !a.isCompleted)
-          .map((a: any) => `• [${a.priority}] ${a.title}`)
-          .join("\n");
-
-        const primaryAssignee = (appItem.actionItems || []).find((a: any) => !a.isCompleted)?.assignedTo || "None";
-        const maxPriority = (appItem.actionItems || []).find((a: any) => !a.isCompleted)?.priority || "LOW";
-
-        const emailSubject =
-          appItem.emailSubject ||
-          appItem.emailThreads?.[appItem.emailThreads.length - 1]?.subject ||
-          appItem.timeline?.find((t: any) => t.emailSubject)?.emailSubject ||
-          `SIRIM e-ComM: ${appItem.applicationRef || appItem.productName || "Update"}`;
-
-        let gmailLink = appItem.gmailThreadLink || "";
-        if (!gmailLink) {
-          if (appItem.threadId && !appItem.threadId.startsWith("th_manual") && !appItem.threadId.startsWith("th_sirim")) {
-            gmailLink = `https://mail.google.com/mail/u/0/#all/${appItem.threadId}`;
-          } else {
-            const query = appItem.applicationRef || appItem.emailSubject || appItem.modelNumber || "SIRIM";
-            gmailLink = `https://mail.google.com/mail/u/0/#search/${encodeURIComponent(query)}`;
-          }
-        }
-
-        rowsData.push([
-          appItem.applicationRef || "",
-          appItem.productName || "",
-          appItem.modelNumber || "",
-          appItem.brand || "",
-          appItem.scheme || "",
-          appItem.status || "",
-          appItem.officerName || "",
-          appItem.officerEmail || "",
-          emailSubject,
-          gmailLink,
-          appItem.submissionDate || "",
-          appItem.lastActivityDate || "",
-          appItem.targetDeadline || "",
-          pendingActions || "None (On Track)",
-          primaryAssignee,
-          maxPriority,
-          appItem.certificateNo || "Pending Approval",
-          appItem.certificateExpiryDate || "-",
-          appItem.processingFeeRm ? Number(appItem.processingFeeRm) : "",
-          appItem.paymentStatus || "NOT_APPLICABLE",
-          appItem.notes || "",
-          new Date().toISOString(),
-        ]);
-      });
-
-      // Overwrite full values in the sheet
-      await sheets.spreadsheets.values.update({
-        spreadsheetId,
-        range: `'${sheetName}'!A1`,
-        valueInputOption: "USER_ENTERED",
-        requestBody: {
-          values: rowsData,
-        },
-      });
+      await writeApplicationsToSheet(accessToken, spreadsheetId, sheetName, appsToSync);
 
       recordTeamActivity({
         userEmail,
@@ -2497,7 +2527,21 @@ Evaluate thoroughly and return a JSON matching the schema.`;
   // ----------------------------------------------------
   // 7. Telegram Bot: Raw Message Sender Helper
   // ----------------------------------------------------
+  /** Sends a message, split into several if it is longer than Telegram allows. */
   async function sendTelegramRawMessage(
+    botToken: string,
+    chatId: string,
+    text: string,
+    options?: { topicId?: string; parseMode?: "HTML" | "Markdown" }
+  ) {
+    let last: any = null;
+    for (const part of splitTelegramMessage(text)) {
+      last = await sendTelegramSingleMessage(botToken, chatId, part, options);
+    }
+    return last;
+  }
+
+  async function sendTelegramSingleMessage(
     botToken: string,
     chatId: string,
     text: string,
@@ -2528,7 +2572,7 @@ Evaluate thoroughly and return a JSON matching the schema.`;
       chat_id: rawChat,
       text,
       parse_mode: options?.parseMode || "HTML",
-      disable_web_page_preview: false,
+      disable_web_page_preview: true,
     };
 
     if (resolvedTopicId) {
@@ -2576,111 +2620,17 @@ Evaluate thoroughly and return a JSON matching the schema.`;
   // ----------------------------------------------------
   // 8. Telegram Bot: Formatter for Daily Morning Briefing
   // ----------------------------------------------------
+  /** Manual "send briefing" uses the same format as the daily briefing. */
   function formatTelegramBriefing(
     applications: any[],
-    options: {
-      title?: string;
-      sheetUrl?: string;
-      newScannedCount?: number;
-      isUrgentAlert?: boolean;
-    }
+    options: { title?: string; sheetUrl?: string; newScannedCount?: number; isUrgentAlert?: boolean }
   ) {
-    const now = new Date();
-    const dateStr = now.toLocaleDateString("en-GB", { timeZone: "Asia/Kuala_Lumpur", day: "2-digit", month: "short", year: "numeric" });
-    const timeStr = now.toLocaleTimeString("en-GB", { timeZone: "Asia/Kuala_Lumpur", hour: "2-digit", minute: "2-digit" });
-
-    const totalApps = applications.length;
-    const rfiApps = applications.filter((a) => a.status === "RFI_ACTION_REQUIRED");
-    const sampleApps = applications.filter((a) => a.status === "SAMPLE_REQUESTED");
-    const pendingPaymentApps = applications.filter((a) => a.status === "PAYMENT_PENDING");
-    const approvedApps = applications.filter((a) => a.status === "APPROVED");
-
-    const headerEmoji = options.isUrgentAlert ? "🚨" : "🌅";
-    const rawHeaderTitle = options.title || (options.isUrgentAlert ? "SIRIM CoC Urgent Action Alert" : "SIRIM CoC Daily Morning Briefing");
-    const headerTitle = escapeHtml(rawHeaderTitle);
-
-    let msg = `${headerEmoji} <b>${headerTitle}</b>\n`;
-    msg += `🏢 <i>Cytron Technologies • Regulatory Compliance Register</i>\n`;
-    msg += `📅 <b>Generated:</b> ${dateStr} at ${timeStr} (MYT)\n\n`;
-
-    msg += `📊 <b>Status Snapshot:</b>\n`;
-    msg += `• Total Monitored Applications: <b>${totalApps}</b>\n`;
-    msg += `• ⚠️ RFI Action Required: <b>${rfiApps.length}</b>\n`;
-    msg += `• 📦 Test Samples Due: <b>${sampleApps.length}</b>\n`;
-    msg += `• 💳 Payment Pending: <b>${pendingPaymentApps.length}</b>\n`;
-    msg += `• ✅ Approved / CoC Issued: <b>${approvedApps.length}</b>\n`;
-    if (options.newScannedCount !== undefined && options.newScannedCount > 0) {
-      msg += `• 📥 Newly Detected Inbound Updates: <b>${options.newScannedCount}</b>\n`;
-    }
-    msg += `\n`;
-
-    // Urgent Action Items & RFIs
-    const urgentQueue = applications.filter((a) =>
-      a.status === "RFI_ACTION_REQUIRED" ||
-      a.status === "SAMPLE_REQUESTED" ||
-      a.status === "PAYMENT_PENDING" ||
-      (a.actionItems && a.actionItems.some((act: any) => !act.isCompleted && (act.priority === "CRITICAL" || act.priority === "HIGH")))
-    ).slice(0, 6);
-
-    if (urgentQueue.length > 0) {
-      msg += `🚨 <b>Action Items & Target Deadlines:</b>\n`;
-      urgentQueue.forEach((app, idx) => {
-        const pending = (app.actionItems || []).find((act: any) => !act.isCompleted);
-        const rawActionText = pending ? pending.title : (app.notes || app.status);
-        const actionText = escapeHtml(rawActionText);
-        const officer = app.officerName ? ` (Officer: ${escapeHtml(app.officerName)})` : "";
-
-        let statusBadge = "⚠️ RFI Required";
-        if (app.status === "SAMPLE_REQUESTED") statusBadge = "📦 Sample Requested";
-        else if (app.status === "PAYMENT_PENDING") statusBadge = "💳 Payment Due";
-        else if (app.status === "TESTING_IN_PROGRESS") statusBadge = "🔬 Testing in Progress";
-
-        const query = app.applicationRef || app.modelNumber || "SIRIM";
-        const gmailLink = app.gmailThreadLink || `https://mail.google.com/mail/u/0/#search/${encodeURIComponent(query)}`;
-
-        const refText = escapeHtml(app.applicationRef || "Ref N/A");
-        const prodText = escapeHtml(app.productName || "Equipment");
-        const modelText = escapeHtml(app.modelNumber || "Model N/A");
-
-        msg += `<b>${idx + 1}. [${refText}]</b> ${prodText} (<code>${modelText}</code>)\n`;
-        msg += `   • Status: <b>${statusBadge}</b>${officer}\n`;
-        if (app.targetDeadline) {
-          msg += `   • SLA Deadline: <b>${escapeHtml(app.targetDeadline)}</b>\n`;
-        }
-        msg += `   • Action: ${actionText}\n`;
-        msg += `   • <a href="${gmailLink}">✉️ Open Gmail Thread</a>\n\n`;
-      });
-    } else {
-      msg += `✨ <b>All Applications On Track!</b> No outstanding RFIs or immediate bottlenecks detected.\n\n`;
-    }
-
-    // AI Autonomous Progress Updates section if any items were auto-resolved by AI
-    const autoResolvedItems = applications.flatMap((a) =>
-      (a.actionItems || [])
-        .filter((act: any) => act.isCompleted && act.autoResolvedByAi)
-        .map((act: any) => ({ app: a, action: act }))
-    ).slice(0, 5);
-
-    if (autoResolvedItems.length > 0) {
-      msg += `🤖 <b>AI Progress Tracker (Auto-Resolved from Emails):</b>\n`;
-      autoResolvedItems.forEach((item, idx) => {
-        const refName = escapeHtml(item.app.applicationRef || item.app.productName || "Application");
-        const actTitle = escapeHtml(item.action.title || "Checklist Requirement");
-        msg += `   ${idx + 1}. ✓ [${refName}] <b>${actTitle}</b>\n`;
-        if (item.action.autoResolvedReason) {
-          msg += `      ↳ <i>${escapeHtml(item.action.autoResolvedReason)}</i>\n`;
-        }
-      });
-      msg += `\n`;
-    }
-
-    // Google Sheet link
-    if (options.sheetUrl) {
-      msg += `📈 <a href="${options.sheetUrl}"><b>📊 Open Master Google Sheet Register ↗</b></a>\n\n`;
-    }
-    msg += `🤖 <i>Automated by SIRIM CoC Intelligence Tracker Engine</i>`;
-
-    return msg;
+    const cfg = getStoredAutomationConfig();
+    return formatDailyBriefing(applications, {
+      title: options.title || (options.isUrgentAlert ? "SIRIM CoC – Action Pending" : undefined),
+      sheetUrl: options.sheetUrl,
+      since: cfg.lastDailyDigestSentAt,
+    });
   }
 
   // ----------------------------------------------------
@@ -2693,7 +2643,15 @@ Evaluate thoroughly and return a JSON matching the schema.`;
   app.post("/api/automation/config", (req: Request, res: Response) => {
     try {
       // The Gmail session can only be set through /api/automation/session; logs are server-owned.
-      const { activeSession: _ignoredSession, logs: _ignoredLogs, ...incoming } = req.body || {};
+      const {
+        activeSession: _ignoredSession,
+        logs: _ignoredLogs,
+        agentGoogle: _ignoredAgent,
+        agentGoogleAvailable: _ignoredAvail,
+        scanState: _ignoredScan,
+        alertedCriticalItemIds: _ignoredAlerted,
+        ...incoming
+      } = req.body || {};
       const current = getStoredAutomationConfig();
       const incomingTelegram = { ...(incoming.telegram || {}) };
       if (isMaskedOrEmpty(incomingTelegram.botToken)) delete incomingTelegram.botToken; // keep the saved token
@@ -2715,6 +2673,93 @@ Evaluate thoroughly and return a JSON matching the schema.`;
   // ----------------------------------------------------
   // Autonomous Agent: Session and Sheet Registration
   // ----------------------------------------------------
+  app.get("/api/automation/google/status", (req: Request, res: Response) => {
+    const cfg = getStoredAutomationConfig();
+    res.json({ ...redactConfig(cfg).agentGoogle, available: agentOAuthConfigured() });
+  });
+
+  app.post("/api/automation/google/connect", (req: Request, res: Response) => {
+    if (!agentOAuthConfigured()) {
+      return res.status(400).json({
+        error: "The server isn't set up for this yet: add GOOGLE_OAUTH_CLIENT_SECRET (and GOOGLE_OAUTH_CLIENT_ID if different) to .env and restart.",
+      });
+    }
+    for (const [k, v] of agentOAuthStates) if (v.expiresAt < Date.now()) agentOAuthStates.delete(k);
+    const state = crypto.randomBytes(24).toString("hex");
+    const redirectUri = agentRedirectUri(req);
+    agentOAuthStates.set(state, { email: req.user!.email, redirectUri, expiresAt: Date.now() + 10 * 60 * 1000 });
+    const url = makeAgentOAuthClient(redirectUri).generateAuthUrl({
+      access_type: "offline",
+      prompt: "consent", // always return a refresh token
+      scope: AGENT_GOOGLE_SCOPES,
+      state,
+      login_hint: req.user!.email,
+    });
+    res.json({ url, redirectUri });
+  });
+
+  // Google redirects the browser here (no app sign-in header), so it is checked with the one-time `state` instead.
+  app.get("/api/automation/google/callback", async (req: Request, res: Response) => {
+    const back = (result: string, reason?: string) =>
+      res.redirect(`/?agentGoogle=${result}${reason ? `&reason=${encodeURIComponent(reason)}` : ""}`);
+    try {
+      const state = String(req.query.state || "");
+      const pending = agentOAuthStates.get(state);
+      agentOAuthStates.delete(state);
+      if (!pending || pending.expiresAt < Date.now()) return back("error", "The link expired. Please try connecting again.");
+      if (req.query.error) return back("error", `Google said: ${req.query.error}`);
+      const client = makeAgentOAuthClient(pending.redirectUri);
+      const { tokens } = await client.getToken(String(req.query.code || ""));
+      if (!tokens.refresh_token) return back("error", "Google did not grant offline access. Please try again.");
+      if (!tokens.id_token) return back("error", "Google did not say which account was connected.");
+      const ticket = await client.verifyIdToken({ idToken: tokens.id_token, audience: agentOAuthClientId() });
+      const email = String(ticket.getPayload()?.email || "").toLowerCase();
+      if (!isAllowedEmail(email)) return back("error", `${email} is not an allowed account.`);
+      const granted = String(tokens.scope || "");
+      if (!granted.includes("gmail.readonly")) return back("error", "Gmail read access was not granted. Please tick the Gmail permission.");
+
+      const cfg = getStoredAutomationConfig();
+      cfg.agentGoogle = {
+        refreshToken: tokens.refresh_token,
+        email,
+        connectedAt: new Date().toISOString(),
+        connectedBy: pending.email,
+        scopes: granted,
+        needsReconnect: false,
+        lastError: null,
+      };
+      cfg.enabled = true;
+      saveStoredAutomationConfig(cfg);
+      agentTokenCache = null;
+      recordTeamActivity({
+        userEmail: pending.email,
+        actionType: "MEMBER_JOINED",
+        description: `${pending.email.split("@")[0]} connected the agent to Google account ${email} for daily scans.`,
+      });
+      triggerAutonomousRunSafely("AGENT_GOOGLE_CONNECTED", email);
+      back("connected");
+    } catch (err: any) {
+      console.error("Agent Google connect failed:", err);
+      back("error", err?.message || "Connection failed");
+    }
+  });
+
+  app.post("/api/automation/google/disconnect", async (req: Request, res: Response) => {
+    const cfg = getStoredAutomationConfig();
+    const token = cfg.agentGoogle?.refreshToken;
+    delete cfg.agentGoogle;
+    saveStoredAutomationConfig(cfg);
+    agentTokenCache = null;
+    if (token) {
+      try {
+        await makeAgentOAuthClient().revokeToken(token);
+      } catch {
+        /* already revoked */
+      }
+    }
+    res.json({ success: true });
+  });
+
   app.post("/api/automation/session", async (req: Request, res: Response) => {
     try {
       const { accessToken, name, picture, expiresAt } = req.body;
@@ -3233,7 +3278,7 @@ Return a JSON object with:
       const testMessage = `✅ <b>SIRIM CoC Tracker — Telegram Connection Verified!</b>\n\n` +
         `Your Telegram bot is successfully connected and configured to receive:\n` +
         `• 🌅 Daily Morning Status Digests & Summaries\n` +
-        `• 🚨 Instant alerts for SIRIM RFIs & Clarification requests\n` +
+        `• 🚨 Instant alerts when a new action is pending for Cytron\n` +
         `• 📦 Sample Call Notices & Lab Delivery Deadlines\n` +
         `• 📊 Auto-updated Google Sheet direct links\n\n` +
         `<i>Time: ${new Date().toLocaleTimeString("en-GB", { timeZone: "Asia/Kuala_Lumpur" })} MYT</i>`;
@@ -3297,25 +3342,7 @@ Return a JSON object with:
 
       let text = message;
       if (!text && application) {
-        const query = application.applicationRef || application.modelNumber || "SIRIM";
-        const gmailLink = application.gmailThreadLink || `https://mail.google.com/mail/u/0/#search/${encodeURIComponent(query)}`;
-        const pending = (application.actionItems || []).find((act: any) => !act.isCompleted);
-        const rawActionText = pending ? pending.title : (application.notes || "Immediate review required");
-
-        let statusBadge = "⚠️ RFI Required";
-        if (application.status === "SAMPLE_REQUESTED") statusBadge = "📦 Sample Requested";
-        else if (application.status === "PAYMENT_PENDING") statusBadge = "💳 Payment Due";
-        else if (application.status === "TESTING_IN_PROGRESS") statusBadge = "🔬 Testing in Progress";
-
-        text = `🚨 <b>SIRIM CoC URGENT ACTION ALERT</b>\n` +
-          `🏢 <i>Cytron Technologies • Regulatory Compliance Register</i>\n\n` +
-          `📁 <b>Application Ref:</b> <code>${escapeHtml(application.applicationRef || "Ref Pending")}</code>\n` +
-          `📦 <b>Product:</b> <b>${escapeHtml(application.productName || "Equipment")}</b> (<code>${escapeHtml(application.modelNumber || "Model N/A")}</code>)\n` +
-          `⚠️ <b>Current Status:</b> <b>${statusBadge}</b>\n` +
-          (application.targetDeadline ? `⏰ <b>Target SLA Deadline:</b> <b>${escapeHtml(application.targetDeadline)}</b>\n` : "") +
-          (application.officerName ? `👤 <b>Assigned Officer:</b> ${escapeHtml(application.officerName)}\n` : "") +
-          `\n⚡ <b>Required Next Action:</b>\n${escapeHtml(rawActionText)}\n\n` +
-          `✉️ <a href="${gmailLink}">Open Inbound Gmail Correspondence ↗</a>`;
+        text = formatAppAlert(application);
       }
 
       if (!text) {
@@ -3347,9 +3374,528 @@ Return a JSON object with:
     userEmail?: string;
     accessToken?: string | null;
     triggerSource?: string;
+    timeBudgetMs?: number;
   }
 
+  // ----------------------------------------------------
+  // Agent: read ONE Gmail thread and fold it into the application list.
+  // Returns the (possibly) updated list. Throws on Gmail/auth errors so the caller can retry.
+  // ----------------------------------------------------
+  interface ProcessThreadResult {
+    applications: any[];
+    updated: boolean;
+    created: boolean;
+    usedFallbackParser: boolean;
+    skipped?: string;
+    label?: string;
+  }
+
+  async function processAgentThread(
+    gmail: any,
+    threadId: string,
+    apps: any[],
+    ctx: { trustedSenders: string[]; aiTimeoutMs: number; forceRefresh?: boolean; isFirstScan?: boolean }
+  ): Promise<ProcessThreadResult> {
+    const result: ProcessThreadResult = { applications: apps, updated: false, created: false, usedFallbackParser: false };
+    const header = (m: any, name: string) =>
+      (m?.payload?.headers || []).find((h: any) => h.name?.toLowerCase() === name)?.value || "";
+
+    const threadRes = await gmail.users.threads.get({ userId: "me", id: threadId, format: "full" });
+    const messages = threadRes.data.messages || [];
+    if (messages.length === 0) return { ...result, skipped: "empty thread" };
+
+    const firstMsg = messages[0];
+    const lastMsg = messages[messages.length - 1];
+    const rootSubject = header(firstMsg, "subject");
+    const lastSubject = header(lastMsg, "subject") || rootSubject;
+    const subject = rootSubject.replace(/^(?:\s*(?:re|fwd?|aw|balas)\s*:\s*)+/gi, "").trim() || rootSubject || lastSubject || "(No Subject)";
+    const from = header(firstMsg, "from") || header(lastMsg, "from");
+    const lastDate = header(lastMsg, "date");
+    const firstDate = header(firstMsg, "date") || lastDate;
+    result.label = subject;
+
+    if (
+      isOutOfOfficeSubject(subject) ||
+      isOutOfOfficeSubject(rootSubject) ||
+      isOutOfOfficeSubject(lastSubject) ||
+      (messages.length === 1 && isOutOfOfficeMessage({ subject, snippet: threadRes.data.snippet || lastMsg.snippet, headers: lastMsg.payload?.headers || [] }))
+    ) {
+      return { ...result, skipped: "out-of-office" };
+    }
+
+    // Relevance: anyone on the thread from SIRIM / MCMC / a configured agent address counts;
+    // otherwise fall back to keyword checks on subject + text.
+    const participants = messages.flatMap((m: any) => [header(m, "from"), header(m, "to"), header(m, "cc")]).filter(Boolean);
+    if (!hasTrustedParticipant(participants, ctx.trustedSenders)) {
+      const sirimCheck = isSirimRegulatoryThread({ subject, from: participants.join(" "), snippet: threadRes.data.snippet || lastMsg.snippet });
+      if (!sirimCheck.isRelated) return { ...result, skipped: "not SIRIM related" };
+    }
+
+    const activeMessages = messages.filter(
+      (m: any) => !isOutOfOfficeMessage({ subject: header(m, "subject"), snippet: m.snippet, headers: m.payload?.headers || [] })
+    );
+    if (activeMessages.length === 0) return { ...result, skipped: "only out-of-office replies" };
+    const effectiveLastDate = header(activeMessages[activeMessages.length - 1], "date") || lastDate;
+    const threadLastDay = toMytDate(effectiveLastDate);
+
+    let existingIdx = findAppByThread(apps, threadId, subject);
+    if (existingIdx < 0 && isDeletedApplication({ threadId })) return { ...result, skipped: "application was deleted" };
+    let existingApp = existingIdx >= 0 ? apps[existingIdx] : null;
+
+    // Only re-read threads that have messages we haven't stored yet.
+    const knownIds = new Set((existingApp?.emailThreads || []).map((m: any) => m.messageId || m.id));
+    const unseen = activeMessages.filter((m: any) => m.id && !knownIds.has(m.id));
+    if (existingApp && unseen.length === 0 && !ctx.forceRefresh) {
+      if (!appThreadIds(existingApp).includes(threadId)) {
+        const copy = [...apps];
+        copy[existingIdx] = { ...existingApp, threadIds: [...appThreadIds(existingApp), threadId] };
+        return { ...result, applications: copy, skipped: "no new messages" };
+      }
+      return { ...result, skipped: "no new messages" };
+    }
+
+    // Messages of THIS thread, in the shape we store them.
+    const toStored = (m: any) => {
+      const extracted = extractEmailBodyText(m.payload);
+      const bodyText = extracted.trim().length > 0 ? extracted : m.snippet || "";
+      const att = extractAttachments(m.payload);
+      return {
+        id: m.id || `msg-${Date.now()}-${Math.random()}`,
+        messageId: m.id || "",
+        threadId,
+        from: header(m, "from") || from,
+        to: header(m, "to"),
+        cc: header(m, "cc"),
+        date: header(m, "date") || lastDate,
+        subject: header(m, "subject") || subject,
+        snippet: m.snippet || bodyText.slice(0, 120),
+        bodyText,
+        hasAttachments: att.hasAttachments,
+        attachmentNames: att.attachmentNames,
+      };
+    };
+    const threadStored = activeMessages.map(toStored);
+
+    /**
+     * Ask the AI about ALL emails we know for this application (other threads included), oldest first,
+     * so the status reflects the latest email overall and items from other threads aren't lost.
+     */
+    const analyze = async (knownApp: any | null): Promise<any> => {
+      const byId = new Map<string, any>();
+      for (const m of [...(knownApp?.emailThreads || []), ...threadStored]) {
+        if (isOutOfOfficeMessage({ subject: m.subject, snippet: m.snippet, headers: [] })) continue;
+        byId.set(m.messageId || m.id, m);
+      }
+      const msgs = Array.from(byId.values()).sort((x, y) => (new Date(x.date).getTime() || 0) - (new Date(y.date).getTime() || 0));
+      const threadCount = new Set(msgs.map((m) => m.threadId || threadId)).size;
+      const blocks = msgs.map((m: any, i: number) => {
+        const tag = i === 0 ? " [EARLIEST MESSAGE]" : i === msgs.length - 1 ? " [LATEST MESSAGE - DETERMINES CURRENT STATUS]" : "";
+        return `=== MESSAGE ${i + 1} OF ${msgs.length}${tag} ===
+FROM: ${m.from || "Unknown"}
+TO: ${m.to || ""}
+CC: ${m.cc || ""}
+DATE: ${m.date || ""}
+SUBJECT: ${m.subject || ""}
+
+BODY:
+${m.bodyText || m.snippet || ""}`;
+      });
+      // Keep the start (product / reference) and, above all, the most recent messages.
+      let transcript = blocks.join("\n\n------------------------------------------------------------\n\n");
+      if (transcript.length > 32000) {
+        transcript = `${transcript.slice(0, 6000)}\n\n[... older messages omitted for length ...]\n\n${transcript.slice(-26000)}`;
+      }
+
+      try {
+        const ai = getGeminiClient();
+        const prompt = `You are an expert Malaysian regulatory compliance specialist in SIRIM QAS International, e-ComM (MCMC), CIDB, and Certificate of Conformity (CoC) certification procedures.
+Analyze this multi-stage Malaysian SIRIM certification email correspondence (${msgs.length} messages${threadCount > 1 ? ` across ${threadCount} email threads about the same application` : ""}, dating from ${msgs[0]?.date || ""} to ${msgs[msgs.length - 1]?.date || ""}):
+Main Thread Subject: ${subject}
+Existing Status: ${knownApp?.status || "None"}
+
+CRITICAL INSTRUCTION - MAIN THREAD (MESSAGE 1) vs REPLIES (MESSAGE 2+):
+1. THE MAIN THREAD (MESSAGE 1) contains the core product identity:
+   - Extract 'applicationRef', 'productName', 'modelNumber', 'brand', and 'scheme' from MESSAGE 1.
+   - Clean product name so it represents the physical equipment.
+2. THE LATEST MESSAGE (MESSAGE N) determines current 'status', 'statusExplanation', and pending 'actionItems'.
+
+${ACTION_DIRECTION_RULES}
+
+EXISTING OPEN ITEMS (use exact titles in resolvedRequirements when the thread shows they are done / answered):
+${JSON.stringify((knownApp?.actionItems || []).filter((a: any) => !a.isCompleted).map((a: any) => ({ title: a.title, category: a.itemCategory, assignedTo: a.assignedTo, type: a.requiredActionType })))}
+
+CRITICAL STATUS CLASSIFICATION RULES (BASED ON THE LATEST STATE):
+- 'RFI_ACTION_REQUIRED':
+  CHOOSE THIS whenever the SIRIM officer, e-ComM officer, or testing lab is requesting technical documents, reports, or clarifications. This includes:
+  * RF test reports, EMC test reports, Safety test reports (MS IEC 62368-1), SAR reports.
+  * Product schematics, PCB layout, block diagram, technical specifications, user manual, datasheet.
+  * Declaration of Conformity (DoC), Letter of Authorization, brand authorization.
+  * Exterior/interior product photos, marking/label artwork, rating plate drawings.
+  * Any written clarifications, answers to officer queries, or amendments.
+  IMPORTANT: Even if an invoice number, quotation, or processing fee is mentioned in the thread or in a quotation table, IF SIRIM IS REQUESTING TECHNICAL DOCUMENTS OR TEST REPORTS, THE STATUS MUST BE 'RFI_ACTION_REQUIRED' (NOT 'PAYMENT_PENDING')!
+
+- 'PAYMENT_PENDING':
+  ONLY choose this if paying an outstanding invoice/fee or uploading payment receipt is the EXCLUSIVE or PRIMARY pending action, and SIRIM is NOT waiting for technical documents or test reports.
+
+- 'UNDER_REVIEW':
+  Choose this if the application is undergoing initial technical review, OR if the applicant (Cytron) already responded to the previous RFI by sending the requested documents and is waiting for officer review.
+
+- 'SAMPLE_REQUESTED':
+  SIRIM has issued a call notice requesting physical hardware test samples to be delivered/couriered to SIRIM QAS Lab (Building 25, Shah Alam).
+
+- 'SAMPLE_SUBMITTED':
+  The applicant has dispatched the physical samples and provided courier tracking consignment info.
+
+- 'TESTING_IN_PROGRESS':
+  SIRIM QAS lab is actively conducting laboratory tests.
+
+- 'FINAL_EVALUATION':
+  Testing and document evaluation completed; queued for final approval review.
+
+- 'APPROVED':
+  SIRIM QAS has approved the application or issued the Certificate of Conformity (CoC) / Type Approval.
+
+Transcript (${msgs.length} messages, oldest first):
+${transcript}
+
+Return a JSON object with:
+isSirimRelated (boolean), applicationRef (string), productName (string), modelNumber (string), brand (string), applicant (string), scheme (string), status (string: 'SUBMITTED'|'UNDER_REVIEW'|'SAMPLE_REQUESTED'|'SAMPLE_SUBMITTED'|'TESTING_IN_PROGRESS'|'RFI_ACTION_REQUIRED'|'PAYMENT_PENDING'|'FINAL_EVALUATION'|'APPROVED'|'REJECTED'|'EXPIRED'), statusExplanation (string), officerName (string), officerEmail (string), processingFeeRm (number), detectedStandards (array of strings), courierTracking (string), quotationOrInvoiceNo (string), paymentStatus (string: 'PAID'|'UNPAID'|'NOT_APPLICABLE'), supplierStatus (string), summary (string), timelineEvents (array of {date, title, description, sender, type: 'status_change'|'rfi'|'document'|'payment'|'approval'|'sample'}), actionItems (array of {itemCategory: 'ACTION_REQUIRED'|'PENDING_STATEMENT', title, description, assignedTo: 'APPLICANT'|'SIRIM'|'SUPPLIER'|'LAB', priority: 'CRITICAL'|'HIGH'|'MEDIUM'|'LOW', requiredActionType: 'SUBMIT_DOC'|'PAY_FEE'|'SEND_SAMPLE'|'PROVIDE_CLARIFICATION'|'AWAIT_SIRIM'|'WAITING_SUPPLIER'|'WAITING_LAB'|'WAITING_REPLY'|'RENEW_CERTIFICATE', dueDate, emailSourceSnippet}), resolvedRequirements (array of {title, reason})`;
+
+        const aiPromise = generateContentWithRetryAndFallback(ai, "gemini-3.8-flash", prompt, { responseMimeType: "application/json" }, "gemini-3.1-flash-lite");
+        const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error("Gemini thread parse timeout")), ctx.aiTimeoutMs));
+        const aiRes: any = await Promise.race([aiPromise, timeoutPromise]);
+        return normalizeParsedActionItems(JSON.parse(aiRes.text?.trim() || "{}"));
+      } catch (parseErr) {
+        result.usedFallbackParser = true;
+        return normalizeParsedActionItems(fallbackHeuristicSirimParser(subject, transcript, from, lastDate));
+      }
+    };
+
+    let parsed: any = await analyze(existingApp);
+
+    if (!parsed || parsed.isSirimRelated === false || parsed.isOutOfOffice || isOutOfOfficeSubject(parsed.productName) || isOutOfOfficeSubject(subject)) {
+      return { ...result, skipped: "AI judged not SIRIM related" };
+    }
+
+    // A separate thread (agent / supplier / follow-up) for an application we already track.
+    if (existingIdx < 0) {
+      existingIdx = findAppByParsedDetails(apps, parsed);
+      existingApp = existingIdx >= 0 ? apps[existingIdx] : null;
+      if (existingApp) parsed = await analyze(existingApp); // now with that application's other emails too
+    }
+
+    const newEmailMessages = messages.map(toStored);
+
+    const extractedTimeline =
+      parsed.timelineEvents && parsed.timelineEvents.length > 0
+        ? parsed.timelineEvents.map((t: any, idx: number) => ({
+            id: `tl-ext-${threadId}-${idx}`,
+            date: toMytDate(t.date) || threadLastDay || todayMyt(),
+            title: t.title || "SIRIM Communication Update",
+            description: t.description || "",
+            sender: t.sender || from,
+            emailSubject: subject,
+            type: t.type || "status_change",
+          }))
+        : [
+            {
+              id: `tl-auto-${threadId}-${activeMessages.length}`,
+              date: threadLastDay || todayMyt(),
+              title: `Email update: ${subject.slice(0, 60)}`,
+              description: parsed.summary || `Read ${activeMessages.length} message(s) in thread.`,
+              sender: from,
+              emailSubject: subject,
+              type: parsed.status === "RFI_ACTION_REQUIRED" ? "rfi" : parsed.status === "APPROVED" ? "approval" : "status_change",
+            },
+          ];
+
+    const nowIso = new Date().toISOString();
+    const updateSummary = String(parsed.statusExplanation || parsed.summary || "").trim();
+    const copy = [...apps];
+
+    if (existingIdx >= 0 && existingApp) {
+      const existing = existingApp;
+      const mergedThreads = [...(existing.emailThreads || [])];
+      for (const nMsg of newEmailMessages) {
+        if (!mergedThreads.some((m: any) => m.id === nMsg.id || (m.messageId && m.messageId === nMsg.messageId))) mergedThreads.push(nMsg);
+      }
+      const mergedTimeline = [...(existing.timeline || [])];
+      for (const evt of extractedTimeline) {
+        if (!mergedTimeline.some((t: any) => t.title === evt.title && t.date === evt.date)) mergedTimeline.push(evt);
+      }
+      mergedTimeline.sort((a: any, b: any) => (a.date < b.date ? -1 : 1));
+
+
+      // Merge action items without duplicates & evaluate AI progress auto-resolution
+      const existingActions = (existing.actionItems || []).map((a: any) => normalizeActionItem(a));
+      const newStatus = parsed.status || existing.status;
+      // Status-based auto-resolution must only fire on an actual status CHANGE; otherwise an item
+      // created while the app was already in that status is wrongly closed on the very next scan.
+      const statusChanged = newStatus !== existing.status;
+      const mergedActions = existingActions.map((item: any) => {
+        if (item.isCompleted) return item;
+
+        // 1. If status reached APPROVED, all pre-approval actions are auto-resolved
+        if (newStatus === "APPROVED") {
+          return {
+            ...item,
+            isCompleted: true,
+            completedAt: new Date().toISOString(),
+            completedBy: "AI Autonomous Engine",
+            autoResolvedByAi: true,
+            autoResolvedAt: new Date().toISOString(),
+            autoResolvedReason: "Auto-resolved: Application granted Certificate of Conformity / Approval by SIRIM QAS.",
+          };
+        }
+
+        // 2. If Gemini identified this action as resolved in resolvedRequirements
+        const resolvedMatch = (parsed.resolvedRequirements || []).find((r: any) =>
+          r.title && (
+            item.title.toLowerCase().includes(r.title.toLowerCase()) ||
+            r.title.toLowerCase().includes(item.title.toLowerCase())
+          )
+        );
+        if (resolvedMatch) {
+          return {
+            ...item,
+            isCompleted: true,
+            completedAt: new Date().toISOString(),
+            completedBy: "AI Autonomous Engine",
+            autoResolvedByAi: true,
+            autoResolvedAt: new Date().toISOString(),
+            autoResolvedReason: resolvedMatch.reason || "Auto-resolved: Verified fulfillment in recent email thread.",
+          };
+        }
+
+        // 3. Autonomous progress resolution heuristic based on status progression
+        const titleLower = (item.title || "").toLowerCase();
+        const type = item.requiredActionType;
+
+        // If samples requested was pending, but status is now SAMPLE_SUBMITTED or TESTING_IN_PROGRESS
+        if ((type === "SEND_SAMPLE" || titleLower.includes("sample")) &&
+            (newStatus === "SAMPLE_SUBMITTED" || newStatus === "TESTING_IN_PROGRESS" || parsed.courierTracking)) {
+          return {
+            ...item,
+            isCompleted: true,
+            completedAt: new Date().toISOString(),
+            completedBy: "AI Autonomous Engine",
+            autoResolvedByAi: true,
+            autoResolvedAt: new Date().toISOString(),
+            autoResolvedReason: `Auto-resolved: Sample submission verified${parsed.courierTracking ? ` (Courier Tracking: ${parsed.courierTracking})` : ""}.`,
+          };
+        }
+
+        // If payment was pending, but payment is now settled or status progressed
+        // (Previously ANY status other than PAYMENT_PENDING closed it, so a new RFI silently "paid" the invoice.)
+        if ((type === "PAY_FEE" || titleLower.includes("invoice") || titleLower.includes("payment")) &&
+            (parsed.paymentStatus === "PAID" || (statusChanged && POST_PAYMENT_STATUSES.has(newStatus)))) {
+          return {
+            ...item,
+            isCompleted: true,
+            completedAt: new Date().toISOString(),
+            completedBy: "AI Autonomous Engine",
+            autoResolvedByAi: true,
+            autoResolvedAt: new Date().toISOString(),
+            autoResolvedReason: "Auto-resolved: Payment acknowledged or invoice settled.",
+          };
+        }
+
+        // If waiting for supplier documents, but supplier documents were received or submitted to SIRIM
+        if ((type === "WAITING_SUPPLIER" || item.assignedTo === "SUPPLIER") &&
+            (parsed.supplierStatus === "DOCUMENTS_RECEIVED_FROM_SUPPLIER" || parsed.supplierStatus === "DOCUMENTS_SUBMITTED_TO_SIRIM" || (statusChanged && newStatus === "UNDER_REVIEW"))) {
+          return {
+            ...item,
+            isCompleted: true,
+            completedAt: new Date().toISOString(),
+            completedBy: "AI Autonomous Engine",
+            autoResolvedByAi: true,
+            autoResolvedAt: new Date().toISOString(),
+            autoResolvedReason: "Auto-resolved: Supplier provided requested CoC technical documentation.",
+          };
+        }
+
+        // If waiting for SIRIM / agent reply (incl. general WAITING_REPLY), and an officer update / next phase has arrived
+        if ((type === "AWAIT_SIRIM" || type === "WAITING_REPLY" || item.assignedTo === "SIRIM") &&
+            statusChanged && (newStatus === "RFI_ACTION_REQUIRED" || newStatus === "SAMPLE_REQUESTED" || newStatus === "PAYMENT_PENDING" || newStatus === "FINAL_EVALUATION")) {
+          return {
+            ...item,
+            isCompleted: true,
+            completedAt: new Date().toISOString(),
+            completedBy: "AI Autonomous Engine",
+            autoResolvedByAi: true,
+            autoResolvedAt: new Date().toISOString(),
+            autoResolvedReason: "Auto-resolved: SIRIM officer provided update / evaluation feedback.",
+          };
+        }
+
+        // If waiting on an external lab, and testing has finished
+        if ((type === "WAITING_LAB" || item.assignedTo === "LAB") && statusChanged && newStatus === "FINAL_EVALUATION") {
+          return {
+            ...item,
+            isCompleted: true,
+            completedAt: new Date().toISOString(),
+            completedBy: "AI Autonomous Engine",
+            autoResolvedByAi: true,
+            autoResolvedAt: new Date().toISOString(),
+            autoResolvedReason: "Auto-resolved: Lab testing completed; application moved to final evaluation.",
+          };
+        }
+
+        // If document submission to SIRIM was pending, but application is now UNDER_REVIEW
+        if ((type === "SUBMIT_DOC" || type === "PROVIDE_CLARIFICATION") && statusChanged && newStatus === "UNDER_REVIEW") {
+          return {
+            ...item,
+            isCompleted: true,
+            completedAt: new Date().toISOString(),
+            completedBy: "AI Autonomous Engine",
+            autoResolvedByAi: true,
+            autoResolvedAt: new Date().toISOString(),
+            autoResolvedReason: "Auto-resolved: Documents/clarifications submitted to SIRIM; application is now under officer review.",
+          };
+        }
+
+        return item;
+      });
+      // Stamp anything the scanner changed so browsers don't overwrite it with an older copy.
+      const scanTime = new Date().toISOString();
+      mergedActions.forEach((m: any, i: number) => {
+        if (m !== existingActions[i]) m.updatedAt = scanTime;
+      });
+
+      if (Array.isArray(parsed.actionItems)) {
+        parsed.actionItems.forEach((act: any, actIdx: number) => {
+          if (!mergedActions.some((a) => a.title.toLowerCase() === act.title.toLowerCase())) {
+            mergedActions.push(normalizeActionItem({
+              id: `act-auto-${threadId}-${actIdx}-${Math.random().toString(36).slice(2, 6)}`,
+              title: act.title,
+              description: act.description || "",
+              itemCategory: act.itemCategory,
+              assignedTo: act.assignedTo || "APPLICANT",
+              dueDate: toMytDate(act.dueDate) || undefined,
+                    updatedAt: new Date().toISOString(),
+              isCompleted: false,
+              priority: act.priority || "HIGH",
+              requiredActionType: act.requiredActionType || "PROVIDE_CLARIFICATION",
+              emailSourceSnippet: act.emailSourceSnippet || undefined,
+            }));
+          }
+        });
+      }
+
+      const statusDidChange = Boolean(parsed.status && parsed.status !== existing.status);
+      copy[existingIdx] = {
+        ...existing,
+        threadIds: Array.from(new Set([...appThreadIds(existing), threadId])),
+        threadId: existing.threadId || threadId,
+        applicationRef:
+          isGeneratedRef(existing.applicationRef) && parsed.applicationRef && !isGeneratedRef(parsed.applicationRef)
+            ? parsed.applicationRef
+            : existing.applicationRef,
+        modelNumber: normalizeModel(existing.modelNumber) ? existing.modelNumber : parsed.modelNumber || existing.modelNumber,
+        productName: existing.productName || parsed.productName,
+        status: parsed.status || existing.status,
+        previousStatus: statusDidChange ? existing.status : existing.previousStatus,
+        statusChangedAt: statusDidChange ? nowIso : existing.statusChangedAt,
+        latestUpdateSummary: updateSummary || existing.latestUpdateSummary,
+        officerName: parsed.officerName || existing.officerName,
+        officerEmail: parsed.officerEmail || existing.officerEmail,
+        emailSubject: existing.emailSubject || subject,
+        lastActivityDate: [threadLastDay, existing.lastActivityDate].filter(Boolean).sort().pop() || "",
+        // Earliest email across all threads of this application.
+        submissionDate: [toMytDate(firstDate), existing.submissionDate].filter(Boolean).sort()[0] || existing.submissionDate,
+        certificateNo: parsed.certificateNo || existing.certificateNo,
+        certificateExpiryDate: toMytDate(parsed.certificateExpiryDate) || existing.certificateExpiryDate,
+        processingFeeRm: parsed.processingFeeRm || existing.processingFeeRm,
+        paymentStatus: parsed.paymentStatus || existing.paymentStatus,
+        supplierStatus: parsed.supplierStatus || existing.supplierStatus,
+        standards: parsed.detectedStandards?.length ? parsed.detectedStandards : existing.standards,
+        courierTracking: parsed.courierTracking || existing.courierTracking,
+        timeline: mergedTimeline,
+        actionItems: mergedActions,
+        emailThreads: mergedThreads,
+        agentUpdatedAt: nowIso,
+        lastModifiedAt: nowIso,
+        lastModifiedBy: "AI Autonomous Engine",
+      };
+      return { ...result, applications: copy, updated: true };
+    }
+
+    const refFromAi = parsed.applicationRef && !isGeneratedRef(parsed.applicationRef) ? parsed.applicationRef : "";
+    copy.unshift({
+      id: `sirim-${threadId}`,
+      threadId,
+      threadIds: [threadId],
+      applicationRef: refFromAi || `SQAS/GEN/${threadId.slice(-6).toUpperCase()}`,
+      productName: parsed.productName || subject,
+      modelNumber: parsed.modelNumber || "",
+      brand: parsed.brand || "Cytron",
+      applicant: parsed.applicant || "Cytron Technologies Sdn Bhd",
+      scheme: parsed.scheme || "Type Approval (MCMC/SIRIM)",
+      status: parsed.status || "UNDER_REVIEW",
+      latestUpdateSummary: updateSummary,
+      officerName: parsed.officerName || "",
+      officerEmail: parsed.officerEmail || "",
+      submissionDate: toMytDate(parsed.submissionDate) || toMytDate(firstDate) || todayMyt(),
+      lastActivityDate: threadLastDay || todayMyt(),
+      targetDeadline: toMytDate(parsed.targetDeadline) || "",
+      emailSubject: subject,
+      gmailThreadLink: `https://mail.google.com/mail/u/0/#all/${threadId}`,
+      certificateNo: parsed.certificateNo || undefined,
+      certificateExpiryDate: toMytDate(parsed.certificateExpiryDate) || undefined,
+      processingFeeRm: parsed.processingFeeRm || undefined,
+      paymentStatus: parsed.paymentStatus || "NOT_APPLICABLE",
+      supplierStatus: parsed.supplierStatus || undefined,
+      standards: parsed.detectedStandards || [],
+      courierTracking: parsed.courierTracking || undefined,
+      notes: parsed.summary || undefined,
+      actionItems: (parsed.actionItems || []).map((act: any, i: number) =>
+        normalizeActionItem({
+          id: `act-auto-${threadId}-${i}-${Math.random().toString(36).slice(2, 6)}`,
+          title: act.title,
+          description: act.description || "",
+          itemCategory: act.itemCategory,
+          assignedTo: act.assignedTo || "APPLICANT",
+          dueDate: toMytDate(act.dueDate) || undefined,
+          isCompleted: false,
+          priority: act.priority || "HIGH",
+          requiredActionType: act.requiredActionType || "PROVIDE_CLARIFICATION",
+          emailSourceSnippet: act.emailSourceSnippet || undefined,
+          updatedAt: nowIso,
+        })
+      ),
+      timeline: extractedTimeline,
+      emailThreads: newEmailMessages,
+      syncedToSheet: false,
+      agentCreatedAt: nowIso,
+      createdInFirstScan: Boolean(ctx.isFirstScan),
+      agentUpdatedAt: nowIso,
+      lastModifiedAt: nowIso,
+      lastModifiedBy: "AI Autonomous Engine",
+    });
+    return { ...result, applications: copy, updated: true, created: true };
+  }
+
+  // Only one agent run at a time (manual click, scheduler and background continuation share this).
+  let pipelineInFlight: Promise<any> | null = null;
   async function runAutonomousPipelineCore(params: AutonomousPipelineParams = {}) {
+    if (pipelineInFlight) {
+      return {
+        success: false,
+        busy: true,
+        error: "The agent is already running. Please try again in a minute.",
+        logs: [],
+        applications: getStoredApplications(),
+      };
+    }
+    pipelineInFlight = runPipelineInner(params);
+    try {
+      return await pipelineInFlight;
+    } finally {
+      pipelineInFlight = null;
+    }
+  }
+
+  async function runPipelineInner(params: AutonomousPipelineParams = {}) {
     const logs: Array<{ timestamp: string; type: string; status: string; message: string; details?: string }> = [];
     const addLog = (type: string, status: string, message: string, details?: string) => {
       logs.push({
@@ -3378,10 +3924,16 @@ Return a JSON object with:
         options = {},
       } = params;
 
-      // The stored Google token lasts ~1 hour (no refresh token). Don't use it once expired.
+      // Which Google account the agent reads: the connected agent account (long-lived) when there is one,
+      // so the inbox doesn't change depending on who clicked "Run". Otherwise the clicking user's token,
+      // or the last saved sign-in while it's still valid (~1 hour).
+      const agentToken = await getAgentAccessToken();
       const storedSession = storedConfig.activeSession;
       const storedTokenValid = Boolean(storedSession?.accessToken && (!storedSession.expiresAt || Date.now() < storedSession.expiresAt));
-      const accessToken = params.accessToken || (storedTokenValid ? storedSession.accessToken : null);
+      const accessToken = agentToken?.token || params.accessToken || (storedTokenValid ? storedSession.accessToken : null);
+      if (!agentToken && accessToken) {
+        backlogUserToken = { token: accessToken, expiresAt: params.accessToken ? Date.now() + 50 * 60 * 1000 : storedSession?.expiresAt || 0 };
+      }
       const userEmail = params.userEmail || storedConfig.activeSession?.email || "autonomous-agent@cytron.io";
 
       const sheetConfig = directSheetConfig || (spreadsheetId ? {
@@ -3415,725 +3967,229 @@ Return a JSON object with:
 
       addLog("SYSTEM", "INFO", `Started automated SIRIM synchronization cycle (${triggerSource}: ${isFirstScan ? "First-Time Historical Mode" : "Routine Scan Mode"}).`);
 
-      // STEP 1: Scan Gmail if access token provided & autoScan enabled
-      if (autoScanGmail && accessToken) {
-        if (isFirstScan) {
-          addLog("SCAN", "INFO", `[First-Time Scan] Scanning 1 whole year (${scanDays} days) of SIRIM QAS & e-ComM email archives (newer_than:${scanDays}d)...`);
-        } else {
-          addLog("SCAN", "INFO", `[Routine Scan] Scanning past 1 month (${scanDays} days) of active SIRIM updates & RFIs (newer_than:${scanDays}d)...`);
-        }
+      // STEP 1: Read Gmail.
+      // Threads to read are kept in a queue (config.scanState) so a big first scan is spread over several
+      // runs instead of stopping after a handful of threads. The first scan only counts as done once the
+      // whole queue has been read.
+      let scanWarning = "";
+      let scanProgressNote = "";
+      let backlogRemaining = false;
+      let threadsRead = 0;
+      let applicationsCreated = 0;
+      let aiFallbacks = 0;
+      const scanState: any = { queue: [], attempts: {}, ...(storedConfig.scanState || {}) };
+      if (!Array.isArray(scanState.queue)) scanState.queue = [];
+      if (!scanState.attempts || typeof scanState.attempts !== "object") scanState.attempts = {};
+      let firstScanJustCompleted = false;
+      const trustedSenders = parseTrustedSenders([
+        ...(Array.isArray(storedConfig.trustedSenders) ? storedConfig.trustedSenders : parseTrustedSenders(storedConfig.trustedSenders)),
+        ...parseTrustedSenders(process.env.SIRIM_AGENT_EMAILS),
+      ]);
+      const timeBudgetMs = params.timeBudgetMs || 25000;
 
+      if (autoScanGmail && accessToken) {
         try {
           const oauth2Client = new google.auth.OAuth2();
           oauth2Client.setCredentials({ access_token: accessToken });
           const gmail = google.gmail({ version: "v1", auth: oauth2Client });
 
-          // Construct query respecting first-time (365d) vs routine (30d) duration, strictly excluding Out of Office
-          const queryBase = `(from:sirim.my OR subject:sirim OR subject:ecomm OR subject:sqas OR subject:"Type Approval" OR subject:"Certificate of Conformity" OR "Certificate of Conformity") ${GMAIL_OOO_EXCLUSION_QUERY}`;
-          const scanQuery = options.scanQuery
-            ? (options.scanQuery.includes("out of office") ? options.scanQuery : `(${options.scanQuery}) ${GMAIL_OOO_EXCLUSION_QUERY}`)
-            : `(${queryBase}) newer_than:${scanDays}d`;
-          const maxThreadSearch = isFirstScan ? 35 : 15;
-
-          const searchRes = await gmail.users.threads.list({
-            userId: "me",
-            q: scanQuery,
-            maxResults: maxThreadSearch,
-          });
-
-          const foundThreads = searchRes.data.threads || [];
-          addLog("SCAN", "SUCCESS", `Found ${foundThreads.length} email threads in Gmail within past ${scanDays} days.`);
-
-          // Process threads (capped to ensure rapid completion without hitting proxy timeouts)
-          const processLimit = isFirstScan ? Math.min(foundThreads.length, 6) : Math.min(foundThreads.length, 5);
-          const scanStartTime = Date.now();
-          const MAX_SCAN_DURATION_MS = 25000; // Never run for more than 25s so HTTP response returns safely
-
-          for (const thread of foundThreads.slice(0, processLimit)) {
-            if (!thread.id) continue;
-            if (Date.now() - scanStartTime > MAX_SCAN_DURATION_MS) {
-              addLog("SCAN", "INFO", "Scan batch time limit reached; continuing with current results.");
-              break;
+          if (scanState.queue.length === 0) {
+            const listingStartedAt = new Date().toISOString();
+            let query: string;
+            if (isFirstScan) {
+              query = buildScanQuery({ newerThanDays: scanDays, trustedSenders });
+            } else {
+              const last = scanState.lastSuccessfulScanAt ? new Date(scanState.lastSuccessfulScanAt).getTime() : 0;
+              // 2 days of overlap so nothing falls between runs; never further back than the routine window.
+              query = last
+                ? buildScanQuery({ after: Math.max(last - 2 * 86400000, Date.now() - scanDays * 86400000) / 1000, trustedSenders })
+                : buildScanQuery({ newerThanDays: scanDays, trustedSenders });
             }
 
+            const ids: string[] = [];
+            let pageToken: string | undefined;
+            do {
+              const page: any = await gmail.users.threads.list({ userId: "me", q: query, maxResults: 100, pageToken });
+              for (const t of page.data.threads || []) if (t.id) ids.push(t.id);
+              pageToken = page.data.nextPageToken || undefined;
+            } while (pageToken && ids.length < 2000);
+
+            scanState.queue = Array.from(new Set(ids));
+            scanState.attempts = {};
+            scanState.total = scanState.queue.length;
+            scanState.processed = 0;
+            scanState.mode = isFirstScan ? "FIRST_SCAN" : "ROUTINE";
+            scanState.listingStartedAt = listingStartedAt;
+            scanState.query = query;
+            addLog(
+              "SCAN",
+              "INFO",
+              isFirstScan
+                ? `[First-time scan] Found ${scanState.total} SIRIM-related email threads from the past ${scanDays} days. Reading them all (this can take several runs).`
+                : `[Daily scan] Found ${scanState.total} email threads with activity since the last scan.`
+            );
+          } else {
+            addLog("SCAN", "INFO", `Continuing scan: ${scanState.queue.length} of ${scanState.total || scanState.queue.length} threads left to read.`);
+          }
+
+          const started = Date.now();
+          while (scanState.queue.length > 0 && Date.now() - started < timeBudgetMs) {
+            const threadId: string = scanState.queue[0];
             try {
-              const threadRes = await gmail.users.threads.get({
-                userId: "me",
-                id: thread.id,
-                format: "full",
+              const r = await processAgentThread(gmail, threadId, currentApplications, {
+                trustedSenders,
+                aiTimeoutMs: params.timeBudgetMs && params.timeBudgetMs > 60000 ? 60000 : 20000,
+                forceRefresh: Boolean(options.forceRefresh),
+                isFirstScan: scanState.mode === "FIRST_SCAN",
               });
-
-              const messages = threadRes.data.messages || [];
-              if (messages.length === 0) continue;
-
-              const lastMsg = messages[messages.length - 1];
-              const firstMsg = messages[0];
-              if (!lastMsg) continue;
-
-              const lastHeaders = lastMsg.payload?.headers || [];
-              const firstHeaders = firstMsg.payload?.headers || [];
-              const rootSubject = firstHeaders.find((h) => h.name?.toLowerCase() === "subject")?.value || "";
-              const lastSubject = lastHeaders.find((h) => h.name?.toLowerCase() === "subject")?.value || rootSubject;
-              const subject = rootSubject.replace(/^(?:re|fwd|fw):\s*/gi, "").trim() || rootSubject || lastSubject || "(No Subject)";
-              const from = firstHeaders.find((h) => h.name?.toLowerCase() === "from")?.value || lastHeaders.find((h) => h.name?.toLowerCase() === "from")?.value || "";
-              const lastDate = lastHeaders.find((h) => h.name?.toLowerCase() === "date")?.value || "";
-              const firstDate = firstHeaders.find((h) => h.name?.toLowerCase() === "date")?.value || lastDate;
-
-              // Check if entire thread or subject indicates Out-of-Office auto-reply
-              if (
-                isOutOfOfficeSubject(subject) ||
-                isOutOfOfficeSubject(rootSubject) ||
-                isOutOfOfficeSubject(lastSubject) ||
-                isOutOfOfficeMessage({ subject, snippet: threadRes.data.snippet || lastMsg.snippet, headers: lastHeaders })
-              ) {
-                addLog("SCAN", "INFO", `[Excluded] Skipped Out-of-Office auto-reply thread: "${subject}"`);
-                continue;
+              currentApplications = r.applications;
+              if (r.updated) newEmailsDetected++;
+              if (r.created) applicationsCreated++;
+              if (r.usedFallbackParser) aiFallbacks++;
+              if (r.skipped && r.skipped !== "no new messages") {
+                addLog("SCAN", "INFO", `[Skipped] "${(r.label || threadId).slice(0, 80)}": ${r.skipped}.`);
               }
-
-              // Check regulatory relevance & filter unrelated marketing/noise
-              const sirimCheck = isSirimRegulatoryThread({
-                subject,
-                from,
-                snippet: threadRes.data.snippet || lastMsg.snippet,
-              });
-              if (!sirimCheck.isRelated) {
-                addLog("SCAN", "INFO", `[Excluded] Skipped unrelated non-regulatory thread: "${subject}"`);
-                continue;
+              scanState.queue.shift();
+              delete scanState.attempts[threadId];
+              scanState.processed = (scanState.processed || 0) + 1;
+              threadsRead++;
+            } catch (threadErr: any) {
+              const code = threadErr?.code || threadErr?.response?.status;
+              if (code === 401 || code === 403) throw threadErr; // token problem: stop, keep the queue for next run
+              const attempts = (scanState.attempts[threadId] || 0) + 1;
+              scanState.queue.shift();
+              if (attempts < 3) {
+                scanState.attempts[threadId] = attempts;
+                scanState.queue.push(threadId);
+              } else {
+                delete scanState.attempts[threadId];
+                scanState.processed = (scanState.processed || 0) + 1;
+                addLog("SCAN", "WARNING", `Gave up on email thread ${threadId} after 3 attempts: ${threadErr?.message || threadErr}`);
               }
-
-              // Filter out trailing/individual Out-of-Office auto-reply messages from this thread
-              const substantiveMessages = messages.filter((m: any) => {
-                const mHeaders = m.payload?.headers || [];
-                const mSub = mHeaders.find((h: any) => h.name?.toLowerCase() === "subject")?.value || "";
-                return !isOutOfOfficeMessage({ subject: mSub, snippet: m.snippet, headers: mHeaders });
-              });
-
-              if (substantiveMessages.length === 0) {
-                addLog("SCAN", "INFO", `[Excluded] Skipped thread containing only Out-of-Office auto-replies: "${subject}"`);
-                continue;
-              }
-
-              const activeMessages = substantiveMessages;
-              const effectiveLastMsg = activeMessages[activeMessages.length - 1] || lastMsg;
-              const effectiveLastHeaders = effectiveLastMsg.payload?.headers || lastHeaders;
-              const effectiveLastDate = effectiveLastHeaders.find((h: any) => h.name?.toLowerCase() === "date")?.value || lastDate;
-
-              // Determine if this thread matches an existing application
-              const existingIdx = currentApplications.findIndex(
-                (a) => a.threadId === thread.id || (a.applicationRef && subject.toLowerCase().includes(a.applicationRef.toLowerCase()))
-              );
-              const existingApp = existingIdx >= 0 ? currentApplications[existingIdx] : null;
-
-              // Don't re-create an application the team deleted.
-              if (!existingApp && isDeletedApplication({ threadId: thread.id })) {
-                continue;
-              }
-
-              // If existing application already has all messages from this thread, skip heavy AI re-parsing
-              const existingMsgCount = existingApp?.emailThreads?.length || 0;
-              const hasNewMessages = !existingApp || activeMessages.length > existingMsgCount || !existingApp.lastActivityDate;
-              if (existingApp && !hasNewMessages && !options.forceRefresh) {
-                continue;
-              }
-
-              // Extract text across substantive messages in chronological sequence
-              const threadTranscript = activeMessages.map((m: any, mIdx: number) => {
-                const mHeaders = m.payload?.headers || [];
-                const mFrom = mHeaders.find((h: any) => h.name?.toLowerCase() === "from")?.value || "Unknown";
-                const mTo = mHeaders.find((h: any) => h.name?.toLowerCase() === "to")?.value || "";
-                const mDate = mHeaders.find((h: any) => h.name?.toLowerCase() === "date")?.value || "";
-                const mSub = mHeaders.find((h: any) => h.name?.toLowerCase() === "subject")?.value || "";
-                const extracted = extractEmailBodyText(m.payload);
-                const text = extracted.trim().length > 0 ? extracted : (m.snippet || "");
-                const isFirst = mIdx === 0;
-                const isLatest = mIdx === activeMessages.length - 1;
-                const tag = isFirst
-                  ? " [ORIGINAL / MAIN APPLICATION MESSAGE - CONTAINS APPLICATION REF, PRODUCT & MODEL]"
-                  : isLatest
-                  ? " [LATEST MESSAGE IN THREAD - DETERMINES CURRENT STATUS]"
-                  : "";
-                return `=== MESSAGE ${mIdx + 1} OF ${activeMessages.length}${tag} ===
-FROM: ${mFrom}
-TO: ${mTo}
-DATE: ${mDate}
-SUBJECT: ${mSub}
-
-BODY:
-${text}`;
-              }).join("\n\n------------------------------------------------------------\n\n");
-
-              // Parse with AI parser (with 9s strict timeout) / fallback heuristic parser
-              let parsed: any = null;
-              try {
-                const ai = getGeminiClient();
-                const prompt = `You are an expert Malaysian regulatory compliance specialist in SIRIM QAS International, e-ComM (MCMC), CIDB, and Certificate of Conformity (CoC) certification procedures.
-Analyze this multi-stage Malaysian SIRIM certification email thread (${messages.length} messages, dating from ${firstDate} to ${lastDate}):
-Main Thread Subject: ${subject}
-Existing Status: ${existingApp?.status || "None"}
-
-CRITICAL INSTRUCTION - MAIN THREAD (MESSAGE 1) vs REPLIES (MESSAGE 2+):
-1. THE MAIN THREAD (MESSAGE 1) contains the core product identity:
-   - Extract 'applicationRef', 'productName', 'modelNumber', 'brand', and 'scheme' from MESSAGE 1.
-   - Clean product name so it represents the physical equipment.
-2. THE LATEST MESSAGE (MESSAGE N) determines current 'status', 'statusExplanation', and pending 'actionItems'.
-
-${ACTION_DIRECTION_RULES}
-
-EXISTING OPEN ITEMS (use exact titles in resolvedRequirements when the thread shows they are done / answered):
-${JSON.stringify((existingApp?.actionItems || []).filter((a: any) => !a.isCompleted).map((a: any) => ({ title: a.title, category: a.itemCategory, assignedTo: a.assignedTo, type: a.requiredActionType })))}
-
-CRITICAL STATUS CLASSIFICATION RULES (BASED ON THE LATEST STATE):
-- 'RFI_ACTION_REQUIRED':
-  CHOOSE THIS whenever the SIRIM officer, e-ComM officer, or testing lab is requesting technical documents, reports, or clarifications. This includes:
-  * RF test reports, EMC test reports, Safety test reports (MS IEC 62368-1), SAR reports.
-  * Product schematics, PCB layout, block diagram, technical specifications, user manual, datasheet.
-  * Declaration of Conformity (DoC), Letter of Authorization, brand authorization.
-  * Exterior/interior product photos, marking/label artwork, rating plate drawings.
-  * Any written clarifications, answers to officer queries, or amendments.
-  IMPORTANT: Even if an invoice number, quotation, or processing fee is mentioned in the thread or in a quotation table, IF SIRIM IS REQUESTING TECHNICAL DOCUMENTS OR TEST REPORTS, THE STATUS MUST BE 'RFI_ACTION_REQUIRED' (NOT 'PAYMENT_PENDING')!
-
-- 'PAYMENT_PENDING':
-  ONLY choose this if paying an outstanding invoice/fee or uploading payment receipt is the EXCLUSIVE or PRIMARY pending action, and SIRIM is NOT waiting for technical documents or test reports.
-
-- 'UNDER_REVIEW':
-  Choose this if the application is undergoing initial technical review, OR if the applicant (Cytron) already responded to the previous RFI by sending the requested documents and is waiting for officer review.
-
-- 'SAMPLE_REQUESTED':
-  SIRIM has issued a call notice requesting physical hardware test samples to be delivered/couriered to SIRIM QAS Lab (Building 25, Shah Alam).
-
-- 'SAMPLE_SUBMITTED':
-  The applicant has dispatched the physical samples and provided courier tracking consignment info.
-
-- 'TESTING_IN_PROGRESS':
-  SIRIM QAS lab is actively conducting laboratory tests.
-
-- 'FINAL_EVALUATION':
-  Testing and document evaluation completed; queued for final approval review.
-
-- 'APPROVED':
-  SIRIM QAS has approved the application or issued the Certificate of Conformity (CoC) / Type Approval.
-
-Thread Transcript (${messages.length} messages):
-${threadTranscript.slice(0, 30000)}
-
-Return a JSON object with:
-isSirimRelated (boolean), applicationRef (string), productName (string), modelNumber (string), brand (string), applicant (string), scheme (string), status (string: 'SUBMITTED'|'UNDER_REVIEW'|'SAMPLE_REQUESTED'|'SAMPLE_SUBMITTED'|'TESTING_IN_PROGRESS'|'RFI_ACTION_REQUIRED'|'PAYMENT_PENDING'|'FINAL_EVALUATION'|'APPROVED'|'REJECTED'|'EXPIRED'), statusExplanation (string), officerName (string), officerEmail (string), processingFeeRm (number), detectedStandards (array of strings), courierTracking (string), quotationOrInvoiceNo (string), paymentStatus (string: 'PAID'|'UNPAID'|'NOT_APPLICABLE'), supplierStatus (string), summary (string), timelineEvents (array of {date, title, description, sender, type: 'status_change'|'rfi'|'document'|'payment'|'approval'|'sample'}), actionItems (array of {itemCategory: 'ACTION_REQUIRED'|'PENDING_STATEMENT', title, description, assignedTo: 'APPLICANT'|'SIRIM'|'SUPPLIER'|'LAB', priority: 'CRITICAL'|'HIGH'|'MEDIUM'|'LOW', requiredActionType: 'SUBMIT_DOC'|'PAY_FEE'|'SEND_SAMPLE'|'PROVIDE_CLARIFICATION'|'AWAIT_SIRIM'|'WAITING_SUPPLIER'|'WAITING_LAB'|'WAITING_REPLY'|'RENEW_CERTIFICATE', dueDate, emailSourceSnippet}), resolvedRequirements (array of {title, reason})`;
-
-                const aiPromise = generateContentWithRetryAndFallback(
-                  ai,
-                  "gemini-3.8-flash",
-                  prompt,
-                  {
-                    responseMimeType: "application/json",
-                  },
-                  "gemini-3.1-flash-lite"
-                );
-
-                const timeoutPromise = new Promise((_, reject) =>
-                  setTimeout(() => reject(new Error("Gemini thread parse timeout")), 9000)
-                );
-
-                const aiRes: any = await Promise.race([aiPromise, timeoutPromise]);
-                parsed = JSON.parse(aiRes.text?.trim() || "{}");
-              } catch (parseErr) {
-                parsed = fallbackHeuristicSirimParser(subject, threadTranscript, from, lastDate);
-              }
-
-              if (
-                parsed &&
-                parsed.isSirimRelated !== false &&
-                !parsed.isOutOfOffice &&
-                !isOutOfOfficeSubject(parsed.productName) &&
-                !isOutOfOfficeSubject(subject)
-              ) {
-                newEmailsDetected++;
-
-                // Map email messages for thread storage
-                const newEmailMessages = messages.map((m: any) => {
-                  const mHeaders = m.payload?.headers || [];
-                  const mSub = mHeaders.find((h: any) => h.name?.toLowerCase() === "subject")?.value || subject;
-                  const mFrom = mHeaders.find((h: any) => h.name?.toLowerCase() === "from")?.value || from;
-                  const mTo = mHeaders.find((h: any) => h.name?.toLowerCase() === "to")?.value || "";
-                  const mDate = mHeaders.find((h: any) => h.name?.toLowerCase() === "date")?.value || lastDate;
-                  const extracted = extractEmailBodyText(m.payload);
-                  const bodyText = extracted.trim().length > 0 ? extracted : (m.snippet || "");
-                  const att = extractAttachments(m.payload);
-                  return {
-                    id: m.id || `msg-${Date.now()}-${Math.random()}`,
-                    messageId: m.id || "",
-                    from: mFrom,
-                    to: mTo || "applicant@cytron.io",
-                    date: mDate,
-                    subject: mSub,
-                    snippet: m.snippet || bodyText.slice(0, 120),
-                    bodyText,
-                    hasAttachments: att.hasAttachments,
-                    attachmentNames: att.attachmentNames,
-                  };
-                });
-
-                // Prepare timeline events
-                const extractedTimeline = (parsed.timelineEvents && parsed.timelineEvents.length > 0)
-                  ? parsed.timelineEvents.map((t: any, idx: number) => ({
-                      id: `tl-ext-${thread.id}-${idx}`,
-                      date: t.date || lastDate?.split("T")[0] || new Date().toISOString().split("T")[0],
-                      title: t.title || "SIRIM Communication Update",
-                      description: t.description || "",
-                      sender: t.sender || from,
-                      emailSubject: subject,
-                      type: t.type || "status_change",
-                    }))
-                  : [
-                      {
-                        id: `tl-auto-${Date.now()}-${thread.id}`,
-                        date: lastDate ? lastDate.split("T")[0] : new Date().toISOString().split("T")[0],
-                        title: `SIRIM Update: ${subject.slice(0, 45)}`,
-                        description: parsed.summary || `Parsed ${messages.length} message(s) in thread.`,
-                        sender: from,
-                        emailSubject: subject,
-                        type: parsed.status === "RFI_ACTION_REQUIRED" ? "rfi" : parsed.status === "APPROVED" ? "approval" : "status_change",
-                      },
-                    ];
-
-                if (existingIdx >= 0) {
-                  const existing = currentApplications[existingIdx];
-                  const existingThreads = existing.emailThreads || [];
-                  const mergedThreads = [...existingThreads];
-                  for (const nMsg of newEmailMessages) {
-                    if (!mergedThreads.some((m) => m.id === nMsg.id || m.messageId === nMsg.messageId)) {
-                      mergedThreads.push(nMsg);
-                    }
-                  }
-
-                  // Merge timeline events without duplicates
-                  const existingTimeline = existing.timeline || [];
-                  const mergedTimeline = [...existingTimeline];
-                  for (const extEvt of extractedTimeline) {
-                    if (!mergedTimeline.some((t) => t.title === extEvt.title && t.date === extEvt.date)) {
-                      mergedTimeline.push(extEvt);
-                    }
-                  }
-                  mergedTimeline.sort((a, b) => (a.date < b.date ? -1 : 1));
-
-                  // Merge action items without duplicates & evaluate AI progress auto-resolution
-                  const existingActions = (existing.actionItems || []).map((a: any) => normalizeActionItem(a));
-                  const newStatus = parsed.status || existing.status;
-                  // Status-based auto-resolution must only fire on an actual status CHANGE; otherwise an item
-                  // created while the app was already in that status is wrongly closed on the very next scan.
-                  const statusChanged = newStatus !== existing.status;
-                  const mergedActions = existingActions.map((item: any) => {
-                    if (item.isCompleted) return item;
-
-                    // 1. If status reached APPROVED, all pre-approval actions are auto-resolved
-                    if (newStatus === "APPROVED") {
-                      return {
-                        ...item,
-                        isCompleted: true,
-                        completedAt: new Date().toISOString(),
-                        completedBy: "AI Autonomous Engine",
-                        autoResolvedByAi: true,
-                        autoResolvedAt: new Date().toISOString(),
-                        autoResolvedReason: "Auto-resolved: Application granted Certificate of Conformity / Approval by SIRIM QAS.",
-                      };
-                    }
-
-                    // 2. If Gemini identified this action as resolved in resolvedRequirements
-                    const resolvedMatch = (parsed.resolvedRequirements || []).find((r: any) =>
-                      r.title && (
-                        item.title.toLowerCase().includes(r.title.toLowerCase()) ||
-                        r.title.toLowerCase().includes(item.title.toLowerCase())
-                      )
-                    );
-                    if (resolvedMatch) {
-                      return {
-                        ...item,
-                        isCompleted: true,
-                        completedAt: new Date().toISOString(),
-                        completedBy: "AI Autonomous Engine",
-                        autoResolvedByAi: true,
-                        autoResolvedAt: new Date().toISOString(),
-                        autoResolvedReason: resolvedMatch.reason || "Auto-resolved: Verified fulfillment in recent email thread.",
-                      };
-                    }
-
-                    // 3. Autonomous progress resolution heuristic based on status progression
-                    const titleLower = (item.title || "").toLowerCase();
-                    const type = item.requiredActionType;
-
-                    // If samples requested was pending, but status is now SAMPLE_SUBMITTED or TESTING_IN_PROGRESS
-                    if ((type === "SEND_SAMPLE" || titleLower.includes("sample")) &&
-                        (newStatus === "SAMPLE_SUBMITTED" || newStatus === "TESTING_IN_PROGRESS" || parsed.courierTracking)) {
-                      return {
-                        ...item,
-                        isCompleted: true,
-                        completedAt: new Date().toISOString(),
-                        completedBy: "AI Autonomous Engine",
-                        autoResolvedByAi: true,
-                        autoResolvedAt: new Date().toISOString(),
-                        autoResolvedReason: `Auto-resolved: Sample submission verified${parsed.courierTracking ? ` (Courier Tracking: ${parsed.courierTracking})` : ""}.`,
-                      };
-                    }
-
-                    // If payment was pending, but payment is now settled or status progressed
-                    // (Previously ANY status other than PAYMENT_PENDING closed it, so a new RFI silently "paid" the invoice.)
-                    if ((type === "PAY_FEE" || titleLower.includes("invoice") || titleLower.includes("payment")) &&
-                        (parsed.paymentStatus === "PAID" || (statusChanged && POST_PAYMENT_STATUSES.has(newStatus)))) {
-                      return {
-                        ...item,
-                        isCompleted: true,
-                        completedAt: new Date().toISOString(),
-                        completedBy: "AI Autonomous Engine",
-                        autoResolvedByAi: true,
-                        autoResolvedAt: new Date().toISOString(),
-                        autoResolvedReason: "Auto-resolved: Payment acknowledged or invoice settled.",
-                      };
-                    }
-
-                    // If waiting for supplier documents, but supplier documents were received or submitted to SIRIM
-                    if ((type === "WAITING_SUPPLIER" || item.assignedTo === "SUPPLIER") &&
-                        (parsed.supplierStatus === "DOCUMENTS_RECEIVED_FROM_SUPPLIER" || parsed.supplierStatus === "DOCUMENTS_SUBMITTED_TO_SIRIM" || (statusChanged && newStatus === "UNDER_REVIEW"))) {
-                      return {
-                        ...item,
-                        isCompleted: true,
-                        completedAt: new Date().toISOString(),
-                        completedBy: "AI Autonomous Engine",
-                        autoResolvedByAi: true,
-                        autoResolvedAt: new Date().toISOString(),
-                        autoResolvedReason: "Auto-resolved: Supplier provided requested CoC technical documentation.",
-                      };
-                    }
-
-                    // If waiting for SIRIM / agent reply (incl. general WAITING_REPLY), and an officer update / next phase has arrived
-                    if ((type === "AWAIT_SIRIM" || type === "WAITING_REPLY" || item.assignedTo === "SIRIM") &&
-                        statusChanged && (newStatus === "RFI_ACTION_REQUIRED" || newStatus === "SAMPLE_REQUESTED" || newStatus === "PAYMENT_PENDING" || newStatus === "FINAL_EVALUATION")) {
-                      return {
-                        ...item,
-                        isCompleted: true,
-                        completedAt: new Date().toISOString(),
-                        completedBy: "AI Autonomous Engine",
-                        autoResolvedByAi: true,
-                        autoResolvedAt: new Date().toISOString(),
-                        autoResolvedReason: "Auto-resolved: SIRIM officer provided update / evaluation feedback.",
-                      };
-                    }
-
-                    // If waiting on an external lab, and testing has finished
-                    if ((type === "WAITING_LAB" || item.assignedTo === "LAB") && statusChanged && newStatus === "FINAL_EVALUATION") {
-                      return {
-                        ...item,
-                        isCompleted: true,
-                        completedAt: new Date().toISOString(),
-                        completedBy: "AI Autonomous Engine",
-                        autoResolvedByAi: true,
-                        autoResolvedAt: new Date().toISOString(),
-                        autoResolvedReason: "Auto-resolved: Lab testing completed; application moved to final evaluation.",
-                      };
-                    }
-
-                    // If document submission to SIRIM was pending, but application is now UNDER_REVIEW
-                    if ((type === "SUBMIT_DOC" || type === "PROVIDE_CLARIFICATION") && statusChanged && newStatus === "UNDER_REVIEW") {
-                      return {
-                        ...item,
-                        isCompleted: true,
-                        completedAt: new Date().toISOString(),
-                        completedBy: "AI Autonomous Engine",
-                        autoResolvedByAi: true,
-                        autoResolvedAt: new Date().toISOString(),
-                        autoResolvedReason: "Auto-resolved: Documents/clarifications submitted to SIRIM; application is now under officer review.",
-                      };
-                    }
-
-                    return item;
-                  });
-                  // Stamp anything the scanner changed so browsers don't overwrite it with an older copy.
-                  const scanTime = new Date().toISOString();
-                  mergedActions.forEach((m: any, i: number) => {
-                    if (m !== existingActions[i]) m.updatedAt = scanTime;
-                  });
-
-                  if (Array.isArray(parsed.actionItems)) {
-                    parsed.actionItems.forEach((act: any, actIdx: number) => {
-                      if (!mergedActions.some((a) => a.title.toLowerCase() === act.title.toLowerCase())) {
-                        mergedActions.push(normalizeActionItem({
-                          id: `act-auto-${Date.now()}-${actIdx}`,
-                          title: act.title,
-                          description: act.description || "",
-                          itemCategory: act.itemCategory,
-                          assignedTo: act.assignedTo || "APPLICANT",
-                          dueDate: act.dueDate || new Date(Date.now() + 7 * 86400000).toISOString().split("T")[0],
-                          isCompleted: false,
-                          priority: act.priority || "HIGH",
-                          requiredActionType: act.requiredActionType || "PROVIDE_CLARIFICATION",
-                          emailSourceSnippet: act.emailSourceSnippet || undefined,
-                        }));
-                      }
-                    });
-                  }
-
-                  currentApplications[existingIdx] = {
-                    ...existing,
-                    lastModifiedAt: new Date().toISOString(),
-                    lastModifiedBy: "AI Autonomous Engine",
-                    status: parsed.status || existing.status,
-                    officerName: parsed.officerName || existing.officerName,
-                    officerEmail: parsed.officerEmail || existing.officerEmail,
-                    emailSubject: subject,
-                    lastActivityDate: lastDate ? lastDate.split("T")[0] : new Date().toISOString().split("T")[0],
-                    certificateNo: parsed.certificateNo || existing.certificateNo,
-                    certificateExpiryDate: parsed.certificateExpiryDate || existing.certificateExpiryDate,
-                    processingFeeRm: parsed.processingFeeRm || existing.processingFeeRm,
-                    paymentStatus: parsed.paymentStatus || existing.paymentStatus,
-                    standards: parsed.detectedStandards?.length ? parsed.detectedStandards : existing.standards,
-                    courierTracking: parsed.courierTracking || existing.courierTracking,
-                    timeline: mergedTimeline,
-                    actionItems: mergedActions,
-                    emailThreads: mergedThreads,
-                  };
-                } else {
-                  currentApplications.unshift({
-                    id: `sirim-${thread.id}`,
-                    threadId: thread.id,
-                    applicationRef: parsed.applicationRef || `SQAS/GEN/${Date.now().toString().slice(-4)}`,
-                    productName: parsed.productName || subject,
-                    modelNumber: parsed.modelNumber || "CYT-NEW-01",
-                    brand: parsed.brand || "Cytron",
-                    applicant: "Cytron Technologies Sdn Bhd",
-                    scheme: parsed.scheme || "Type Approval (MCMC/SIRIM)",
-                    status: parsed.status || "UNDER_REVIEW",
-                    officerName: parsed.officerName || "SIRIM Evaluator",
-                    officerEmail: parsed.officerEmail || from,
-                    submissionDate: parsed.submissionDate || firstDate?.split("T")[0] || new Date().toISOString().split("T")[0],
-                    lastActivityDate: lastDate ? lastDate.split("T")[0] : new Date().toISOString().split("T")[0],
-                    targetDeadline: parsed.targetDeadline || new Date(Date.now() + 7 * 86400000).toISOString().split("T")[0],
-                    emailSubject: subject,
-                    gmailThreadLink: `https://mail.google.com/mail/u/0/#all/${thread.id}`,
-                    certificateNo: parsed.certificateNo || undefined,
-                    certificateExpiryDate: parsed.certificateExpiryDate || undefined,
-                    processingFeeRm: parsed.processingFeeRm || undefined,
-                    paymentStatus: parsed.paymentStatus || "NOT_APPLICABLE",
-                    standards: parsed.detectedStandards || [],
-                    courierTracking: parsed.courierTracking || undefined,
-                    notes: parsed.summary || undefined,
-                    actionItems: (parsed.actionItems || []).map((act: any, i: number) => normalizeActionItem({
-                      id: `act-auto-${Date.now()}-${i}`,
-                      title: act.title,
-                      description: act.description || "",
-                      itemCategory: act.itemCategory,
-                      assignedTo: act.assignedTo || "APPLICANT",
-                      dueDate: act.dueDate || new Date(Date.now() + 7 * 86400000).toISOString().split("T")[0],
-                      isCompleted: false,
-                      priority: act.priority || "HIGH",
-                      requiredActionType: act.requiredActionType || "PROVIDE_CLARIFICATION",
-                    })),
-                    timeline: extractedTimeline,
-                    emailThreads: newEmailMessages,
-                    syncedToSheet: false,
-                  });
-                }
-              }
-            } catch (threadProcErr: any) {
-              console.warn("Could not process thread during auto-scan", threadProcErr);
             }
           }
 
-          // Mark first scan as completed in stored config
-          storedConfig.hasCompletedFirstScan = true;
-          storedConfig.firstScanCompletedAt = new Date().toISOString();
-          saveStoredAutomationConfig(storedConfig);
-          addLog("SCAN", "SUCCESS", `Email scan completed (${isFirstScan ? "1-Year Historical Ingestion" : "1-Month Routine Update"}). Registered first scan completion.`);
+          if (scanState.queue.length === 0) {
+            scanState.lastSuccessfulScanAt = scanState.listingStartedAt || new Date().toISOString();
+            if (scanState.mode === "FIRST_SCAN") firstScanJustCompleted = true;
+            addLog(
+              "SCAN",
+              "SUCCESS",
+              `${scanState.mode === "FIRST_SCAN" ? "First-time scan complete" : "Daily scan complete"}: read ${scanState.processed || 0} threads, ${newEmailsDetected} with new emails this run, ${applicationsCreated} new applications.`
+            );
+          } else {
+            backlogRemaining = true;
+            scanProgressNote =
+              scanState.mode === "FIRST_SCAN"
+                ? `First-time scan in progress: ${scanState.processed || 0} of ${scanState.total} email threads read so far. It carries on automatically.`
+                : `${scanState.queue.length} email threads still to read; the agent carries on automatically.`;
+            addLog("SCAN", "INFO", scanProgressNote);
+          }
+          if (aiFallbacks > 0) {
+            addLog("SCAN", "WARNING", `${aiFallbacks} thread(s) were read with the basic keyword parser because the AI did not answer in time. Their details may be less accurate.`);
+          }
         } catch (scanErr: any) {
-          addLog("SCAN", "WARNING", `Gmail auto-scan skipped or failed: ${scanErr?.message || scanErr}`);
+          const code = scanErr?.code || scanErr?.response?.status;
+          scanWarning =
+            code === 401 || code === 403
+              ? "Gmail could not be checked: Google refused the agent's sign-in. Reconnect Google in Automation settings."
+              : `Gmail could not be checked: ${scanErr?.message || scanErr}`;
+          addLog("SCAN", "ERROR", scanWarning);
         }
+      } else if (autoScanGmail) {
+        scanWarning = storedConfig.agentGoogle?.needsReconnect
+          ? "Gmail could not be checked: the agent's Google connection has expired or was removed. Reconnect Google in Automation settings."
+          : "Gmail could not be checked: the agent isn't connected to Google. Connect Google in Automation settings.";
+        addLog("SCAN", "WARNING", scanWarning);
       } else {
-        addLog(
-          "SCAN",
-          autoScanGmail && !accessToken ? "WARNING" : "INFO",
-          autoScanGmail && !accessToken
-            ? "Gmail scan skipped: the saved Google sign-in has expired (Google tokens last about 1 hour). Open the tracker and sign in to refresh it."
-            : "Gmail scan disabled in automation settings."
-        );
+        addLog("SCAN", "INFO", "Gmail scan is turned off in automation settings.");
       }
 
-      // STEP 2: Auto-Sync Google Sheet
+      // Fold this run's changes into the latest saved data, so edits teammates made while the agent was
+      // running (and deletions) are kept rather than overwritten.
+      currentApplications = mergeApplicationsList(getStoredApplications(), currentApplications, "AI Autonomous Engine");
+      saveStoredApplications(currentApplications);
+
+      // STEP 2: Google Sheet (replaces the whole tab so removed applications disappear)
       let sheetSyncSuccess = false;
       if (autoSyncSheet && sheetConfig?.spreadsheetId && accessToken) {
-        addLog("SHEET_SYNC", "INFO", `Syncing ${currentApplications.length} applications to Google Sheet (${sheetConfig.spreadsheetId})...`);
         try {
-          const oauth2Client = new google.auth.OAuth2();
-          oauth2Client.setCredentials({ access_token: accessToken });
-          const sheets = google.sheets({ version: "v4", auth: oauth2Client });
-
-          const headers = [
-            "Application Ref No",
-            "Product Name",
-            "Model Number",
-            "Brand",
-            "Certification Scheme",
-            "Status",
-            "Assigned SIRIM Officer",
-            "Officer Email",
-            "Email Subject / Thread Name",
-            "Gmail Thread Link",
-            "Submission Date",
-            "Last Activity",
-            "Target SLA Deadline",
-            "Pending Action Items",
-            "Action Assignee",
-            "Priority",
-            "Certificate No",
-            "Certificate Expiry",
-            "Fee (RM)",
-            "Payment Status",
-            "Notes / Summary",
-            "Last Synced (UTC)",
-          ];
-
-          const rowsData: any[][] = [headers];
-          currentApplications.forEach((appItem: any) => {
-            const pendingActions = (appItem.actionItems || [])
-              .filter((a: any) => !a.isCompleted)
-              .map((a: any) => `• [${a.priority}] ${a.title}`)
-              .join("\n");
-
-            const primaryAssignee = (appItem.actionItems || []).find((a: any) => !a.isCompleted)?.assignedTo || "None";
-            const maxPriority = (appItem.actionItems || []).find((a: any) => !a.isCompleted)?.priority || "LOW";
-
-            const emailSubject =
-              appItem.emailSubject ||
-              appItem.emailThreads?.[appItem.emailThreads.length - 1]?.subject ||
-              `SIRIM e-ComM: ${appItem.applicationRef || appItem.productName || "Update"}`;
-
-            let gmailLink = appItem.gmailThreadLink || "";
-            if (!gmailLink) {
-              const query = appItem.applicationRef || appItem.emailSubject || appItem.modelNumber || "SIRIM";
-              gmailLink = `https://mail.google.com/mail/u/0/#search/${encodeURIComponent(query)}`;
-            }
-
-            rowsData.push([
-              appItem.applicationRef || "",
-              appItem.productName || "",
-              appItem.modelNumber || "",
-              appItem.brand || "",
-              appItem.scheme || "",
-              appItem.status || "",
-              appItem.officerName || "",
-              appItem.officerEmail || "",
-              emailSubject,
-              gmailLink,
-              appItem.submissionDate || "",
-              appItem.lastActivityDate || "",
-              appItem.targetDeadline || "",
-              pendingActions || "None (On Track)",
-              primaryAssignee,
-              maxPriority,
-              appItem.certificateNo || "Pending Approval",
-              appItem.certificateExpiryDate || "-",
-              appItem.processingFeeRm ? Number(appItem.processingFeeRm) : "",
-              appItem.paymentStatus || "NOT_APPLICABLE",
-              appItem.notes || "",
-              new Date().toISOString(),
-            ]);
-          });
-
-          await sheets.spreadsheets.values.update({
-            spreadsheetId: sheetConfig.spreadsheetId,
-            range: `'${sheetConfig.sheetName || "Active CoC Applications"}'!A1`,
-            valueInputOption: "USER_ENTERED",
-            requestBody: { values: rowsData },
-          });
-
+          await writeApplicationsToSheet(accessToken, sheetConfig.spreadsheetId, sheetConfig.sheetName || "Active CoC Applications", currentApplications);
           sheetSyncSuccess = true;
-          addLog("SHEET_SYNC", "SUCCESS", `Master Google Sheet successfully updated with ${currentApplications.length} applications.`);
+          addLog("SHEET_SYNC", "SUCCESS", `Google Sheet updated with ${currentApplications.length} applications.`);
         } catch (sheetErr: any) {
-          addLog("SHEET_SYNC", "ERROR", `Failed to sync Google Sheet: ${sheetErr?.message || sheetErr}`);
+          addLog("SHEET_SYNC", "ERROR", `Failed to update the Google Sheet: ${sheetErr?.message || sheetErr}`);
         }
+      } else if (autoSyncSheet && sheetConfig?.spreadsheetId) {
+        addLog("SHEET_SYNC", "WARNING", "Google Sheet not updated: the agent isn't connected to Google.");
       } else {
-        addLog("SHEET_SYNC", "INFO", "Google Sheet sync skipped (no configured sheet ID or disabled).");
+        addLog("SHEET_SYNC", "INFO", "Google Sheet sync skipped (no sheet linked or turned off).");
       }
 
-      // STEP 3: Dispatch Telegram Digest / Notification (STRICT SPAM PREVENTION)
+      // STEP 3: Telegram
+      // Sent for: the scheduled daily briefing, a manual "run now" with Telegram on, or a brand-new
+      // critical Cytron action found in this run (if instant alerts are on).
       let telegramSent = false;
       const tgBotToken = resolveBotToken(telegramConfig?.botToken) || undefined;
       const tgChatId = telegramConfig?.chatId || process.env.TELEGRAM_CHAT_ID;
+      const latestConfig = getStoredAutomationConfig();
+      const alertedIds: string[] = Array.isArray(latestConfig.alertedCriticalItemIds) ? latestConfig.alertedCriticalItemIds : [];
+      const isMorningDigestTrigger = triggerSource === "SCHEDULED_MORNING";
+      const isManualTrigger = triggerSource === "MANUAL_CLICK";
 
-      // Rate limit check: Strict cooldown enforcement
-      // - 5 minutes cooldown EVEN FOR MANUAL CLICKS (prevents UI button double-clicking from spamming)
-      // - 30 minutes cooldown for any automated alert
-      const nowMs = Date.now();
-      const lastTelegramSentMs = storedConfig.lastTelegramSentAt ? new Date(storedConfig.lastTelegramSentAt).getTime() : 0;
-      const minCooldownMs = triggerSource === "MANUAL_CLICK" ? 5 * 60 * 1000 : 30 * 60 * 1000;
-      const isCooldownActive = (nowMs - lastTelegramSentMs < minCooldownMs);
+      const unalertedCritical = currentApplications.flatMap((a) =>
+        (a.actionItems || [])
+          .map((act: any) => normalizeActionItem(act))
+          .filter((act: any) => !act.isCompleted && act.priority === "CRITICAL" && act.itemCategory === "ACTION_REQUIRED" && !alertedIds.includes(act.id))
+          .map((act: any) => ({ app: a, action: act }))
+      );
+      // During the first scan everything is "new"; don't fire dozens of instant alerts for old items.
+      const allowInstantAlerts = !isFirstScan && newEmailsDetected > 0 && Boolean(telegramConfig?.instantAlertOnCritical);
+      const sendInstant = allowInstantAlerts && unalertedCritical.length > 0;
+      const sendDigest = (isMorningDigestTrigger && telegramConfig?.dailyDigest !== false) || (isManualTrigger && autoSendTelegram);
 
-      // Telegram should ONLY ever be sent if:
-      // A) It is a scheduled morning digest (triggerSource === "SCHEDULED_MORNING") AND daily digest hasn't been sent today, OR
-      // B) A user explicitly clicked "Run Automation Now" / "Send Telegram" in UI (triggerSource === "MANUAL_CLICK"), OR
-      // C) A brand new critical RFI was detected in THIS specific cycle that has NEVER been alerted before
-      const isMorningDigestTrigger = (triggerSource === "SCHEDULED_MORNING");
-      const isManualTrigger = (triggerSource === "MANUAL_CLICK");
+      let lastTelegramSentAt = latestConfig.lastTelegramSentAt;
+      let lastDailyDigestSentAt = latestConfig.lastDailyDigestSentAt;
+      const newlyAlertedIds: string[] = [];
 
-      if (!Array.isArray(storedConfig.alertedCriticalItemIds)) {
-        storedConfig.alertedCriticalItemIds = [];
-      }
-
-      // Only consider critical items that have not yet been alerted
-      const unalertedCriticalActions = (newEmailsDetected > 0)
-        ? currentApplications.flatMap((a) =>
-            (a.actionItems || [])
-              .filter((act: any) => !act.isCompleted && act.priority === 'CRITICAL' && !storedConfig.alertedCriticalItemIds.includes(act.id))
-              .map((act: any) => ({ app: a, action: act }))
-          )
-        : [];
-      const hasBrandNewCriticalRfi = unalertedCriticalActions.length > 0;
-
-      // Only allow Telegram if configured, not in cooldown, and is one of the 3 approved triggers
-      const shouldSendTelegram = Boolean(autoSendTelegram || (hasBrandNewCriticalRfi && telegramConfig?.instantAlertOnCritical)) &&
-        Boolean(tgBotToken) &&
-        Boolean(tgChatId) &&
-        !isCooldownActive &&
-        (isMorningDigestTrigger || isManualTrigger || (hasBrandNewCriticalRfi && telegramConfig?.instantAlertOnCritical));
-
-      if (shouldSendTelegram) {
-        addLog("TELEGRAM", "INFO", `Sending notification to Telegram Chat (${tgChatId})...`);
+      if (!tgBotToken || !tgChatId || telegramConfig?.enabled === false) {
+        if (sendDigest || sendInstant) addLog("TELEGRAM", "INFO", "Telegram not sent (not configured or turned off).");
+      } else {
         try {
-          const briefingText = formatTelegramBriefing(currentApplications, {
-            sheetUrl: sheetConfig?.spreadsheetUrl,
-            newScannedCount: newEmailsDetected,
-          });
-
-          await sendTelegramRawMessage(tgBotToken, tgChatId, briefingText, {
-            topicId: telegramConfig?.topicId,
-          });
-
-          telegramSent = true;
-          storedConfig.lastTelegramSentAt = new Date().toISOString();
-
-          // Mark brand new critical items as alerted so they never trigger another alert
-          if (hasBrandNewCriticalRfi) {
-            storedConfig.alertedCriticalItemIds = [
-              ...storedConfig.alertedCriticalItemIds,
-              ...unalertedCriticalActions.map((item) => item.action.id),
-            ].slice(-200);
+          if (sendDigest) {
+            const text = formatDailyBriefing(currentApplications, {
+              sheetUrl: sheetConfig?.spreadsheetUrl,
+              // First briefing ever: show the last 24 hours.
+              since: lastDailyDigestSentAt || new Date(Date.now() - 86400000).toISOString(),
+              scanWarning,
+              scanProgressNote,
+            });
+            await sendTelegramRawMessage(tgBotToken, tgChatId, text, { topicId: telegramConfig?.topicId });
+            telegramSent = true;
+            lastTelegramSentAt = new Date().toISOString();
+            if (isMorningDigestTrigger) lastDailyDigestSentAt = lastTelegramSentAt;
+            unalertedCritical.forEach((x) => newlyAlertedIds.push(x.action.id)); // covered by the briefing
+            addLog("TELEGRAM", "SUCCESS", isMorningDigestTrigger ? "Daily briefing sent to Telegram." : "Briefing sent to Telegram.");
+          } else if (sendInstant) {
+            for (const { app: alertApp, action } of unalertedCritical.slice(0, 5)) {
+              await sendTelegramRawMessage(tgBotToken, tgChatId, formatAppAlert(alertApp), { topicId: telegramConfig?.topicId });
+              newlyAlertedIds.push(action.id);
+            }
+            unalertedCritical.slice(5).forEach((x) => newlyAlertedIds.push(x.action.id));
+            telegramSent = true;
+            lastTelegramSentAt = new Date().toISOString();
+            addLog("TELEGRAM", "SUCCESS", `Sent ${Math.min(5, unalertedCritical.length)} instant alert(s) for new critical Cytron actions.`);
           }
-
-          addLog("TELEGRAM", "SUCCESS", "Telegram notification delivered successfully.");
         } catch (tgErr: any) {
           addLog("TELEGRAM", "ERROR", `Telegram delivery failed: ${tgErr?.message || tgErr}`);
         }
-      } else {
-        if (isCooldownActive) {
-          const minutesLeft = Math.ceil((minCooldownMs - (nowMs - lastTelegramSentMs)) / 60000);
-          addLog("TELEGRAM", "INFO", `Telegram notification suppressed: Cooldown active (${minutesLeft}m remaining to prevent spam).`);
-        } else if (!autoSendTelegram && !hasBrandNewCriticalRfi && !isManualTrigger && !isMorningDigestTrigger) {
-          addLog("TELEGRAM", "INFO", "Telegram briefing skipped: Routine autonomous cycle (runs silently without Telegram spam).");
-        } else if (!tgBotToken || !tgChatId) {
-          addLog("TELEGRAM", "INFO", "Telegram dispatch skipped (not configured).");
-        } else {
-          addLog("TELEGRAM", "INFO", "Telegram briefing skipped (conditions not met).");
-        }
+      }
+      if (isFirstScan) {
+        // Old critical items found during the first scan shouldn't trigger instant alerts later.
+        unalertedCritical.forEach((x) => newlyAlertedIds.push(x.action.id));
       }
 
-      // Persist the combined, updated applications to central server storage
-      saveStoredApplications(currentApplications);
+      // (applications were already merged with the latest saved data and saved above)
 
       recordTeamActivity({
         userEmail,
@@ -4144,25 +4200,38 @@ isSirimRelated (boolean), applicationRef (string), productName (string), modelNu
 
       addLog("SYSTEM", "SUCCESS", `Automated synchronization pipeline completed successfully (${triggerSource}).`);
 
-      // Update central automation config with run results
-      storedConfig.lastRunAt = new Date().toISOString();
-      storedConfig.lastRunStatus = "SUCCESS";
-      storedConfig.lastRunSummary = `Autonomous cycle completed (${triggerSource}, ${isFirstScan ? "1-Year Ingestion" : "1-Month Routine"}): ${newEmailsDetected} new emails, ${sheetSyncSuccess ? "Sheet updated" : "Sheet skipped"}, ${telegramSent ? "Telegram delivered" : "Telegram skipped"}.`;
-      if (!Array.isArray(storedConfig.logs)) storedConfig.logs = [];
-      storedConfig.logs = [...logs, ...storedConfig.logs].slice(0, 100);
-      saveStoredAutomationConfig(storedConfig);
+      // Save only the fields this run owns, on top of the latest config (settings changed meanwhile are kept).
+      const finalConfig = getStoredAutomationConfig();
+      finalConfig.scanState = scanState;
+      if (firstScanJustCompleted) {
+        finalConfig.hasCompletedFirstScan = true;
+        finalConfig.firstScanCompletedAt = new Date().toISOString();
+      }
+      finalConfig.lastTelegramSentAt = lastTelegramSentAt;
+      finalConfig.lastDailyDigestSentAt = lastDailyDigestSentAt;
+      finalConfig.alertedCriticalItemIds = Array.from(new Set([...alertedIds, ...newlyAlertedIds])).slice(-500);
+      finalConfig.lastRunAt = new Date().toISOString();
+      finalConfig.lastRunStatus = scanWarning ? "WARNING" : "SUCCESS";
+      finalConfig.lastRunSummary = scanWarning
+        ? scanWarning
+        : `${triggerSource}: read ${threadsRead} threads (${newEmailsDetected} with new emails, ${applicationsCreated} new applications)${backlogRemaining ? `, ${scanState.queue.length} still queued` : ""}; ${sheetSyncSuccess ? "Sheet updated" : "Sheet not updated"}; ${telegramSent ? "Telegram sent" : "no Telegram"}.`;
+      finalConfig.logs = [...logs, ...(Array.isArray(finalConfig.logs) ? finalConfig.logs : [])].slice(0, 100);
+      saveStoredAutomationConfig(finalConfig);
 
       return {
         success: true,
-        summary: `Cycle finished (${triggerSource}, ${isFirstScan ? "1-Year Historical Ingestion" : "1-Month Routine Scan"}): ${newEmailsDetected} new emails detected, ${sheetSyncSuccess ? "Sheet updated" : "Sheet skipped"}, ${telegramSent ? "Telegram sent" : "Telegram skipped"}.`,
+        summary: finalConfig.lastRunSummary,
+        scanWarning,
+        backlogRemaining,
+        scanProgress: { processed: scanState.processed || 0, total: scanState.total || 0, remaining: scanState.queue.length },
         applications: currentApplications,
         updatedApplications: currentApplications,
         sheetSyncResult: { success: sheetSyncSuccess },
         scanResult: { threadsFound: newEmailsDetected },
         isFirstScan,
         scanDays,
-        hasCompletedFirstScan: true,
-        firstScanCompletedAt: storedConfig.firstScanCompletedAt,
+        hasCompletedFirstScan: Boolean(finalConfig.hasCompletedFirstScan),
+        firstScanCompletedAt: finalConfig.firstScanCompletedAt,
         newEmailsDetected,
         sheetSyncSuccess,
         telegramSent,
@@ -4196,6 +4265,7 @@ isSirimRelated (boolean), applicationRef (string), productName (string), modelNu
       runAutonomousPipelineCore({
         triggerSource: source,
         userEmail,
+        timeBudgetMs: 4 * 60 * 1000,
         autoSendTelegram: false, // Hands-free credentials/sheet setup runs completely silent without Telegram
       }).catch((err) => {
         console.error(`[triggerAutonomousRunSafely] Error running cycle (${source}):`, err);
@@ -4216,14 +4286,19 @@ isSirimRelated (boolean), applicationRef (string), productName (string), modelNu
       const triggerSource = isManualClick ? "MANUAL_CLICK" : (req.body.triggerSource || "AUTONOMOUS_CYCLE");
       const autoSendTelegram = isManualClick ? Boolean(req.body.options?.autoSendTelegram ?? true) : false;
 
-      const result = await runAutonomousPipelineCore({
-        ...req.body,
+      const { timeBudgetMs: _ignoredBudget, ...body } = req.body || {};
+      const result: any = await runAutonomousPipelineCore({
+        ...body,
         userEmail: req.user?.email || req.body.userEmail,
         accessToken: accessToken || req.body.accessToken,
         triggerSource,
         autoSendTelegram,
+        timeBudgetMs: 25000, // keep the HTTP request short; the rest continues in the background
       });
 
+      if (result.busy) {
+        return res.status(409).json(result);
+      }
       if (!result.success && result.error) {
         return res.status(500).json(result);
       }
@@ -4245,6 +4320,8 @@ isSirimRelated (boolean), applicationRef (string), productName (string), modelNu
       const config = getStoredAutomationConfig();
       config.hasCompletedFirstScan = false;
       delete config.firstScanCompletedAt;
+      // Drop any half-finished queue so the next run lists the whole year again.
+      config.scanState = { queue: [], attempts: {} };
       saveStoredAutomationConfig(config);
       res.json({
         success: true,
@@ -4279,65 +4356,74 @@ isSirimRelated (boolean), applicationRef (string), productName (string), modelNu
   // Background Autonomous Scheduler Engine (Server-side)
   // Runs 24/7 on local Node server or Cloud Run, checking every 30s
   // ----------------------------------------------------
-  let isAutonomousRunning = false;
   let lastAutonomousIntervalMs = Date.now();
+  let schedulerTickRunning = false;
 
+  // Every 30s:
+  //  1. Daily run at the scheduled time (default 08:30 MYT): read new emails, update the Sheet, send the
+  //     Telegram briefing. If the server was off at that time it catches up later the same day (until 18:00).
+  //  2. Otherwise, if a scan still has threads queued (e.g. the first-time scan), keep reading in the background.
+  //  3. Otherwise an optional extra check every N minutes (autonomousIntervalMinutes, silent).
   setInterval(async () => {
+    if (schedulerTickRunning || pipelineInFlight) return;
+    schedulerTickRunning = true;
     try {
       const config = getStoredAutomationConfig();
       if (!config || !config.enabled) return;
 
       const now = new Date();
-      const nowMs = now.getTime();
-      const intervalMinutes = config.autonomousIntervalMinutes !== undefined ? config.autonomousIntervalMinutes : 0;
-      const intervalMs = intervalMinutes * 60 * 1000;
-
-      // Date in Asia/Kuala_Lumpur (YYYY-MM-DD)
-      const mytDate = new Intl.DateTimeFormat("en-CA", {
-        timeZone: "Asia/Kuala_Lumpur",
-        year: "numeric",
-        month: "2-digit",
-        day: "2-digit",
-      }).format(now);
-
-      // Time in Asia/Kuala_Lumpur (HH:MM)
-      const mytTime = new Intl.DateTimeFormat("en-GB", {
-        timeZone: "Asia/Kuala_Lumpur",
-        hour: "2-digit",
-        minute: "2-digit",
-        hour12: false,
-      }).format(now);
-
+      const mytDate = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kuala_Lumpur", year: "numeric", month: "2-digit", day: "2-digit" }).format(now);
+      const mytTime = new Intl.DateTimeFormat("en-GB", { timeZone: "Asia/Kuala_Lumpur", hour: "2-digit", minute: "2-digit", hour12: false }).format(now);
       const targetTime = config.scheduleTime || "08:30";
-      const isMorningScheduledTime = (mytTime >= targetTime && config.lastDailyDigestDate !== mytDate);
-      const isPeriodicIntervalDue = intervalMinutes > 0 && (nowMs - lastAutonomousIntervalMs >= intervalMs);
+      const catchUpUntil = "18:00";
 
-      if ((isMorningScheduledTime || isPeriodicIntervalDue) && !isAutonomousRunning) {
-        isAutonomousRunning = true;
-        lastAutonomousIntervalMs = nowMs;
-
-        const triggerSource = isMorningScheduledTime ? "SCHEDULED_MORNING" : "AUTONOMOUS_DAEMON";
-        console.log(`[Autonomous Scheduler] Triggering autonomous compliance cycle (${triggerSource}) at ${mytTime} MYT...`);
-
-        if (isMorningScheduledTime) {
-          config.lastDailyDigestDate = mytDate;
-          saveStoredAutomationConfig(config);
+      const dailyDue = config.lastDailyDigestDate !== mytDate && mytTime >= targetTime;
+      if (dailyDue) {
+        // Mark today first so a crash can't make it loop.
+        const marked = getStoredAutomationConfig();
+        marked.lastDailyDigestDate = mytDate;
+        saveStoredAutomationConfig(marked);
+        if (mytTime > catchUpUntil) {
+          console.log(`[Scheduler] Missed today's ${targetTime} run (server was off); next run tomorrow.`);
+          return;
         }
+        console.log(`[Scheduler] Daily run at ${mytTime} MYT`);
+        await runAutonomousPipelineCore({
+          triggerSource: "SCHEDULED_MORNING",
+          userEmail: "AI Autonomous Engine",
+          timeBudgetMs: 4 * 60 * 1000, // read emails first (up to ~4 min), then send the briefing
+          autoSendTelegram: true,
+        });
+        return;
+      }
 
-        try {
-          await runAutonomousPipelineCore({
-            triggerSource,
-            userEmail: config.activeSession?.email || "autonomous-agent@cytron.io",
-            autoSendTelegram: isMorningScheduledTime === true, // ONLY send Telegram briefing for scheduled morning digest! Routine intervals run silently.
-          });
-        } catch (schedErr: any) {
-          console.error(`[Autonomous Scheduler] Error during cycle (${triggerSource}):`, schedErr?.message || schedErr);
-        } finally {
-          isAutonomousRunning = false;
-        }
+      const hasBacklog = Array.isArray(config.scanState?.queue) && config.scanState.queue.length > 0;
+      if (hasBacklog) {
+        const fallbackToken = backlogUserToken && Date.now() < backlogUserToken.expiresAt ? backlogUserToken.token : undefined;
+        await runAutonomousPipelineCore({
+          triggerSource: "BACKLOG",
+          userEmail: "AI Autonomous Engine",
+          accessToken: fallbackToken,
+          timeBudgetMs: 4 * 60 * 1000,
+          autoSendTelegram: false,
+        });
+        return;
+      }
+
+      const intervalMinutes = Number(config.autonomousIntervalMinutes || 0);
+      if (intervalMinutes > 0 && Date.now() - lastAutonomousIntervalMs >= intervalMinutes * 60 * 1000) {
+        lastAutonomousIntervalMs = Date.now();
+        await runAutonomousPipelineCore({
+          triggerSource: "AUTONOMOUS_DAEMON",
+          userEmail: "AI Autonomous Engine",
+          timeBudgetMs: 4 * 60 * 1000,
+          autoSendTelegram: false,
+        });
       }
     } catch (schedErr: any) {
-      console.error("[Autonomous Scheduler] Error during automation tick:", schedErr?.message || schedErr);
+      console.error("[Scheduler] Error during automation tick:", schedErr?.message || schedErr);
+    } finally {
+      schedulerTickRunning = false;
     }
   }, 30000);
 

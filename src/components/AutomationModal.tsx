@@ -32,6 +32,7 @@ import {
   UserAuthSession,
 } from '../types';
 import { safeFetchJson } from '../utils/api';
+import { AgentGoogleCard } from './AgentGoogleCard';
 
 interface AutomationModalProps {
   isOpen: boolean;
@@ -384,6 +385,8 @@ export const AutomationModal: React.FC<AutomationModalProps> = ({
                 </div>
               </div>
 
+              <AgentGoogleCard config={localConfig} onUpdate={handleUpdate} />
+
               {/* Step-by-Step Pipeline Configuration */}
               <div>
                 <h3 className="text-xs font-semibold text-slate-700 uppercase tracking-wider mb-3">
@@ -405,7 +408,7 @@ export const AutomationModal: React.FC<AutomationModalProps> = ({
                             </span>
                           </div>
                           <p className="text-xs text-slate-500 mt-0.5">
-                            Scans emails for SIRIM status updates, RFIs, test sample call notices, and invoices.
+                            Reads emails for SIRIM status updates, document requests, test sample call notices and invoices.
                           </p>
                         </div>
                       </div>
