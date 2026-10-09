@@ -54,7 +54,14 @@ import {
   getSupplierStatusBadgeInfo,
   getAssigneeBadgeInfo,
 } from '../utils/formatters';
-import { separateActionItems, getActionLabelInfo, isPendingStatement } from '../utils/actionItemUtils';
+import {
+  separateActionItems,
+  getActionLabelInfo,
+  isPendingStatement,
+  normalizeActionItem,
+  toPendingStatement,
+  toActionRequired,
+} from '../utils/actionItemUtils';
 import { notificationAudio } from '../utils/audio';
 import { getDefaultChecklistForScheme } from '../utils/documentChecklistDefaults';
 import { DocumentPreScreenModal } from './DocumentPreScreenModal';
@@ -350,12 +357,23 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({
     });
   };
 
+  // Re-label an item when the AI put it in the wrong bucket
+  // (e.g. a question Cytron sent to SIRIM / the agent shown as a "Cytron Action").
+  const handleReclassifyAction = (actionId: string, target: 'SIRIM' | 'SUPPLIER' | 'LAB' | 'APPLICANT') => {
+    onUpdateApplication({
+      ...application,
+      actionItems: application.actionItems.map((a) =>
+        a.id !== actionId ? a : target === 'APPLICANT' ? toActionRequired(a) : toPendingStatement(a, target)
+      ),
+    });
+  };
+
   // Add Action Item
   const handleAddAction = (e: React.FormEvent) => {
     e.preventDefault();
     if (!newActionTitle.trim()) return;
 
-    const newAction: ActionItem = {
+    const newAction: ActionItem = normalizeActionItem({
       id: `act-custom-${Date.now()}`,
       title: newActionTitle.trim(),
       description: newActionDesc.trim() || newActionTitle.trim(),
@@ -371,7 +389,7 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({
       requiredActionType: newActionType,
       dueDate: newActionDueDate || undefined,
       isCompleted: false,
-    };
+    } as ActionItem);
 
     onUpdateApplication({
       ...application,
@@ -1020,10 +1038,15 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({
                         onChange={(e) => setNewActionAssignee(e.target.value as ActionAssignee)}
                         className="w-full text-xs px-2 py-1.5 border border-slate-300 rounded-lg bg-white"
                       >
-                        <option value="SUPPLIER">Hardware Supplier / ODM</option>
-                        <option value="SIRIM">SIRIM QAS Officer</option>
-                        <option value="LAB">External Test Lab</option>
-                        <option value="APPLICANT">Cytron / Applicant</option>
+                        {newActionCategory === 'PENDING_STATEMENT' ? (
+                          <>
+                            <option value="SIRIM">SIRIM Officer / Agent</option>
+                            <option value="SUPPLIER">Hardware Supplier / ODM</option>
+                            <option value="LAB">External Test Lab</option>
+                          </>
+                        ) : (
+                          <option value="APPLICANT">Cytron / Applicant</option>
+                        )}
                       </select>
                     </div>
                     <div>
@@ -1059,7 +1082,6 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({
                             <option value="PAY_FEE">Pay Fee</option>
                             <option value="SEND_SAMPLE">Send Sample</option>
                             <option value="PROVIDE_CLARIFICATION">Provide Clarification</option>
-                            <option value="AWAIT_SIRIM">Await SIRIM</option>
                             <option value="RENEW_CERTIFICATE">Renew Certificate</option>
                           </>
                         )}
@@ -1236,7 +1258,7 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({
                                   {action.priority}
                                 </span>
                                 {(() => {
-                                  const aInfo = getAssigneeBadgeInfo(action.assignedTo, isStmt);
+                                  const aInfo = getAssigneeBadgeInfo(normalizeActionItem(action).assignedTo || 'APPLICANT', isStmt);
                                   return (
                                     <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded border ${aInfo.bg} ${aInfo.text} ${aInfo.border}`}>
                                       {aInfo.label}
@@ -1327,18 +1349,41 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({
                                     >
                                       Record offline receipt
                                     </button>
+                                    <button
+                                      onClick={() => handleReclassifyAction(action.id, 'APPLICANT')}
+                                      className="text-[10px] text-slate-400 hover:text-slate-700 underline transition-colors"
+                                      title="This is actually something Cytron must do"
+                                    >
+                                      Mark as Cytron action
+                                    </button>
                                   </>
                                 ) : (
-                                  <button
-                                    onClick={() => {
-                                      setActiveTab('ai-reply');
-                                      setReplyCustomNotes(action.title);
-                                    }}
-                                    className="text-blue-600 hover:text-blue-800 font-semibold flex items-center gap-1 text-xs"
-                                  >
-                                    <Sparkles className="w-3 h-3" />
-                                    <span>Draft Reply for this</span>
-                                  </button>
+                                  <>
+                                    <button
+                                      onClick={() => {
+                                        setActiveTab('ai-reply');
+                                        setReplyCustomNotes(action.title);
+                                      }}
+                                      className="text-blue-600 hover:text-blue-800 font-semibold flex items-center gap-1 text-xs"
+                                    >
+                                      <Sparkles className="w-3 h-3" />
+                                      <span>Draft Reply for this</span>
+                                    </button>
+                                    <select
+                                      value=""
+                                      onChange={(e) => {
+                                        const v = e.target.value as 'SIRIM' | 'SUPPLIER' | 'LAB';
+                                        if (v) handleReclassifyAction(action.id, v);
+                                      }}
+                                      className="text-[10px] text-slate-500 bg-transparent border border-slate-200 rounded px-1 py-0.5 cursor-pointer hover:border-slate-400"
+                                      title="Wrong label? Move this to Pending Statements if Cytron is waiting on someone else"
+                                    >
+                                      <option value="">Actually waiting on…</option>
+                                      <option value="SIRIM">SIRIM / agent</option>
+                                      <option value="SUPPLIER">Supplier</option>
+                                      <option value="LAB">Lab</option>
+                                    </select>
+                                  </>
                                 )}
                               </div>
                             )}

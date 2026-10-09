@@ -1,3 +1,4 @@
+import { normalizeActionItem } from '../utils/actionItemUtils';
 import React, { useState } from 'react';
 import {
   X,
@@ -282,18 +283,18 @@ export const GmailScannerModal: React.FC<GmailScannerModalProps> = ({
             continue;
           }
 
-          const actionItems: ActionItem[] = (aiResult.actionItems || []).map((a: any, idx: number) => ({
+          const actionItems: ActionItem[] = (aiResult.actionItems || []).map((a: any, idx: number) => (normalizeActionItem({
             id: `act-${threadId}-${idx}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
             title: a.title,
             description: a.description,
-            itemCategory: a.itemCategory || (a.assignedTo === 'APPLICANT' ? 'ACTION_REQUIRED' : 'PENDING_STATEMENT'),
+            itemCategory: a.itemCategory, // left undefined when the AI omits it so normalizeActionItem decides
             assignedTo: a.assignedTo || 'APPLICANT',
             dueDate: a.dueDate || undefined,
             isCompleted: false,
             priority: a.priority || 'HIGH',
             requiredActionType: a.requiredActionType || 'SUBMIT_DOC',
             emailSourceSnippet: a.emailSourceSnippet || undefined,
-          }));
+          }) as ActionItem));
 
           // Reconstruct multi-event timeline if provided by Gemini, or fallback to single event
           let timeline: TimelineEvent[] = [];

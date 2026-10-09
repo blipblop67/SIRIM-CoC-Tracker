@@ -258,7 +258,8 @@ export function getAssigneeBadgeInfo(
       case 'LAB':
         return { label: 'Waiting on Lab Report', bg: 'bg-amber-50', text: 'text-amber-700', border: 'border-amber-200' };
       case 'APPLICANT':
-        return { label: 'Cytron Action', bg: 'bg-rose-50', text: 'text-rose-700', border: 'border-rose-200' };
+        // A pending statement is never a Cytron action, even if the stored assignee is wrong.
+        return { label: 'Waiting on Reply', bg: 'bg-blue-50', text: 'text-blue-700', border: 'border-blue-200' };
     }
   }
 

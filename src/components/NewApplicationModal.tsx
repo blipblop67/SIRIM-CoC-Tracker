@@ -22,7 +22,7 @@ import {
   ParsedEmailResult,
 } from '../types';
 import { notificationAudio } from '../utils/audio';
-import { separateActionItems, getActionLabelInfo } from '../utils/actionItemUtils';
+import { separateActionItems, getActionLabelInfo, normalizeActionItem } from '../utils/actionItemUtils';
 
 interface NewApplicationModalProps {
   isOpen: boolean;
@@ -160,18 +160,18 @@ export const NewApplicationModal: React.FC<NewApplicationModalProps> = ({
 
     const threadId = `th_manual_${Date.now()}`;
 
-    const actionItems: ActionItem[] = (parsedPreview.actionItems || []).map((a, idx) => ({
+    const actionItems: ActionItem[] = (parsedPreview.actionItems || []).map((a, idx) => (normalizeActionItem({
       id: `act-${Date.now()}-${idx}`,
       title: a.title,
       description: a.description,
-      itemCategory: a.itemCategory || (a.assignedTo === 'APPLICANT' ? 'ACTION_REQUIRED' : 'PENDING_STATEMENT'),
+      itemCategory: a.itemCategory, // left undefined when the AI omits it so normalizeActionItem decides
       assignedTo: a.assignedTo || 'APPLICANT',
       dueDate: a.dueDate || undefined,
       isCompleted: false,
       priority: a.priority || 'HIGH',
       requiredActionType: a.requiredActionType || 'SUBMIT_DOC',
       emailSourceSnippet: a.emailSourceSnippet || undefined,
-    }));
+    }) as ActionItem));
 
     const timeline: TimelineEvent[] = [
       {

@@ -13,6 +13,31 @@ import {
   isSirimRegulatoryThread,
   GMAIL_OOO_EXCLUSION_QUERY,
 } from "./src/utils/outOfOffice";
+import { normalizeActionItem } from "./src/utils/actionItemUtils";
+
+// Shared prompt rules: WHO has the ball decides whether an item is a Cytron action or a waiting statement.
+const ACTION_DIRECTION_RULES = `CRITICAL - WHO HAS THE BALL (DIRECTION OF THE LATEST QUESTION / REQUEST):
+Before creating any action item, work out who sent the latest message and who is expected to respond next.
+Cytron people include anyone @cytron.io (e.g. Rupa). The SIRIM side includes SIRIM QAS / e-ComM / MCMC officers AND any SIRIM agent / consultant / registration agent acting for the application.
+- If CYTRON sent the latest message asking a question, asking for confirmation, advice or a decision (e.g. "Can we apply under one model?", "Please confirm whether…", "Is X acceptable?"), or submitted documents, then Cytron is WAITING. This is a PENDING_STATEMENT, NOT an action for Cytron:
+    * itemCategory 'PENDING_STATEMENT', assignedTo 'SIRIM' (officer or agent) / 'SUPPLIER' / 'LAB' = whoever must answer
+    * requiredActionType 'AWAIT_SIRIM' (or 'WAITING_REPLY' for a general question, 'WAITING_SUPPLIER', 'WAITING_LAB')
+    * Title starts with "Waiting for…", e.g. "Waiting for SIRIM agent to confirm if UC100-915M and UC100-915M-EA can be registered under one Type Approval"
+- Only when SIRIM / the agent / supplier / lab asked CYTRON to do, provide, answer or decide something (and Cytron has not yet done it) is it an ACTION_REQUIRED item (assignedTo 'APPLICANT').
+- Never create an ACTION_REQUIRED item whose content is Cytron's own question. Quoting Cytron's own question in 'emailSourceSnippet' means Cytron is waiting.
+- Never mix: ACTION_REQUIRED always has assignedTo 'APPLICANT' and an active type (SUBMIT_DOC, PAY_FEE, SEND_SAMPLE, PROVIDE_CLARIFICATION, RENEW_CERTIFICATE). PENDING_STATEMENT always has assignedTo SIRIM/SUPPLIER/LAB and a waiting type (AWAIT_SIRIM, WAITING_SUPPLIER, WAITING_LAB, WAITING_REPLY).
+- If the other party has since answered a question Cytron was waiting on, list the old waiting item in 'resolvedRequirements' and create any new item based on their answer.`;
+
+/** Normalizes AI / heuristic action items so category, assignee and type never contradict each other. */
+function normalizeParsedActionItems(data: any): any {
+  if (data && Array.isArray(data.actionItems)) {
+    data.actionItems = data.actionItems.map((a: any) => normalizeActionItem(a));
+  }
+  return data;
+}
+
+// Statuses that can only be reached after the processing fee has been settled.
+const POST_PAYMENT_STATUSES = new Set(["TESTING_IN_PROGRESS", "FINAL_EVALUATION", "APPROVED"]);
 
 dotenv.config();
 
@@ -347,14 +372,14 @@ function fallbackHeuristicSirimParser(emailSubject: string, emailBody: string, s
     latestLower.includes("kindly provide") ||
     latestLower.includes("kindly submit") ||
     latestLower.includes("request for information") ||
-    latestLower.includes("rfi") ||
+    /\brfi\b/.test(latestLower) ||
     latestLower.includes("clarification") ||
     latestLower.includes("amendment") ||
     latestLower.includes("test report") ||
     latestLower.includes("schematic") ||
     latestLower.includes("user manual") ||
     latestLower.includes("declaration of conformity") ||
-    latestLower.includes("doc") ||
+    /\bdoc\b/.test(latestLower) ||
     latestLower.includes("authorization letter") ||
     latestLower.includes("datasheet") ||
     latestLower.includes("missing document") ||
@@ -367,6 +392,14 @@ function fallbackHeuristicSirimParser(emailSubject: string, emailBody: string, s
     if (hasApplicantForwardedToSirim) {
       status = "UNDER_REVIEW"; // Applicant has already submitted supplier/updated docs to SIRIM
       if (hasSupplierInThread) supplierStatus = "DOCUMENTS_SUBMITTED_TO_SIRIM";
+    } else if (isApplicantReply && !isSupplierSender) {
+      // The latest message is Cytron's OWN outgoing reply/question (e.g. "Can we apply under one model?").
+      // Cytron has the ball in the other party's court: this is waiting, not a Cytron action.
+      status = "UNDER_REVIEW";
+      if (hasSupplierInThread && (latestLower.includes("supplier") || latestLower.includes("factory") || latestLower.includes("vendor"))) {
+        status = "RFI_ACTION_REQUIRED";
+        supplierStatus = "WAITING_FOR_SUPPLIER_DOCS";
+      }
     } else if (hasSupplierInThread && (latestLower.includes("waiting for supplier") || latestLower.includes("requested from supplier") || latestLower.includes("checking with factory"))) {
       status = "RFI_ACTION_REQUIRED";
       supplierStatus = "WAITING_FOR_SUPPLIER_DOCS";
@@ -1094,6 +1127,8 @@ You MUST differentiate clearly between an ACTIVE ACTION REQUIRED vs a PASSIVE PE
    - Set 'assignedTo': 'SUPPLIER' | 'SIRIM' | 'LAB'
    - Set 'requiredActionType': 'WAITING_SUPPLIER' | 'AWAIT_SIRIM' | 'WAITING_LAB' | 'WAITING_REPLY'
 
+${ACTION_DIRECTION_RULES}
+
 CRITICAL STATUS CLASSIFICATION RULES (BASED ON THE LATEST STATE):
 - 'RFI_ACTION_REQUIRED':
   CHOOSE THIS whenever the SIRIM officer, e-ComM officer, or testing lab is requesting technical documents, reports, or clarifications, OR when supplier has provided documents that have not yet been submitted to SIRIM. This includes:
@@ -1141,6 +1176,7 @@ ${
 Ref: ${existingApplication.applicationRef}
 Product: ${existingApplication.productName}
 Current Status: ${existingApplication.status}
+Open Items: ${JSON.stringify((existingApplication.actionItems || []).filter((a: any) => !a.isCompleted).map((a: any) => ({ title: a.title, category: a.itemCategory, assignedTo: a.assignedTo })))}
 `
     : ""
 }
@@ -1157,7 +1193,7 @@ OUTPUT RULES:
 9. Extract any courier tracking consignment numbers for test sample deliveries to SIRIM QAS (e.g. GDEX, PosLaju, DHL).
 10. Extract Quotation/Invoice number and processing fee in RM (Ringgit Malaysia).
 11. Extract Certificate Number and Expiry Date if approved.
-12. Extract critical active action items required by SIRIM or Lab.
+12. Extract the open items for the LATEST state: ACTION_REQUIRED items for things SIRIM / the agent / supplier / lab asked Cytron to do, and PENDING_STATEMENT items for anything Cytron is waiting on (including questions Cytron asked). Follow the WHO HAS THE BALL rules.
 13. IMPORTANT: Extract ALL chronological timeline milestones across the entire thread history into 'timelineEvents' (e.g., initial submission, quotation issued, sample requested, RFI clarification sent, lab evaluation, approval). Also provide a single 'timelineEvent' for the latest update.
 14. AUTONOMOUS PROGRESS EVALUATION (AI REPLACES MANUAL CHECKMARK TICKING):
     - Identify if recent communications in the thread fulfill, answer, or resolve any pending requirements or earlier RFIs.
@@ -1358,7 +1394,7 @@ Return ONLY a valid JSON object matching this schema.`;
         throw new Error("No response returned by Gemini model");
       }
 
-      const parsedData = JSON.parse(jsonText);
+      const parsedData = normalizeParsedActionItems(JSON.parse(jsonText));
       res.json({ success: true, data: parsedData });
     } catch (err: any) {
       console.warn("Gemini AI parse error, utilizing fallback regulatory parser:", err?.message || err);
@@ -1369,7 +1405,7 @@ Return ONLY a valid JSON object matching this schema.`;
           req.body?.sender || "",
           req.body?.date || ""
         );
-        res.json({ success: true, data: heuristicData, isFallback: true });
+        res.json({ success: true, data: normalizeParsedActionItems(heuristicData), isFallback: true });
       } catch (fallbackErr) {
         res.status(500).json({
           error: "Failed to parse email with Gemini AI",
@@ -2882,7 +2918,7 @@ EVALUATION RULES:
    - For sample delivery: Did applicant provide courier tracking (PosLaju, GDEX, DHL) or did SIRIM acknowledge receiving the test sample?
    - For fee payment: Was payment receipt sent or acknowledged?
    - For waiting on supplier: Did supplier deliver the requested technical data/lab reports?
-   - For waiting on SIRIM: Did officer respond with review results or next steps?
+   - For waiting on SIRIM / agent (incl. a question Cytron asked, e.g. "can we apply under one model?"): Did the officer or agent actually answer? A message sent BY Cytron never resolves a waiting item.
    - If the application status is 'APPROVED', all submission and testing actions are considered resolved.
 2. If an action item is resolved, provide:
    - "actionId": the exact id of the action item
@@ -2948,7 +2984,7 @@ Return a JSON object with:
             reason = `Auto-resolved: Test sample dispatched${targetApp.courierTracking ? ` (Tracking: ${targetApp.courierTracking})` : ""}.`;
           } else if (
             (act.requiredActionType === "PAY_FEE" || act.title.toLowerCase().includes("payment")) &&
-            (targetApp.paymentStatus === "PAID" || targetApp.status !== "PAYMENT_PENDING")
+            (targetApp.paymentStatus === "PAID" || POST_PAYMENT_STATUSES.has(targetApp.status))
           ) {
             resolved = true;
             reason = "Auto-resolved: Payment settled or acknowledged by SIRIM finance.";
@@ -3451,6 +3487,11 @@ CRITICAL INSTRUCTION - MAIN THREAD (MESSAGE 1) vs REPLIES (MESSAGE 2+):
    - Clean product name so it represents the physical equipment.
 2. THE LATEST MESSAGE (MESSAGE N) determines current 'status', 'statusExplanation', and pending 'actionItems'.
 
+${ACTION_DIRECTION_RULES}
+
+EXISTING OPEN ITEMS (use exact titles in resolvedRequirements when the thread shows they are done / answered):
+${JSON.stringify((existingApp?.actionItems || []).filter((a: any) => !a.isCompleted).map((a: any) => ({ title: a.title, category: a.itemCategory, assignedTo: a.assignedTo, type: a.requiredActionType })))}
+
 CRITICAL STATUS CLASSIFICATION RULES (BASED ON THE LATEST STATE):
 - 'RFI_ACTION_REQUIRED':
   CHOOSE THIS whenever the SIRIM officer, e-ComM officer, or testing lab is requesting technical documents, reports, or clarifications. This includes:
@@ -3486,7 +3527,7 @@ Thread Transcript (${messages.length} messages):
 ${threadTranscript.slice(0, 30000)}
 
 Return a JSON object with:
-isSirimRelated (boolean), applicationRef (string), productName (string), modelNumber (string), brand (string), applicant (string), scheme (string), status (string: 'SUBMITTED'|'UNDER_REVIEW'|'SAMPLE_REQUESTED'|'SAMPLE_SUBMITTED'|'TESTING_IN_PROGRESS'|'RFI_ACTION_REQUIRED'|'PAYMENT_PENDING'|'FINAL_EVALUATION'|'APPROVED'|'REJECTED'|'EXPIRED'), statusExplanation (string), officerName (string), officerEmail (string), processingFeeRm (number), detectedStandards (array of strings), courierTracking (string), quotationOrInvoiceNo (string), summary (string), timelineEvents (array of {date, title, description, sender, type: 'status_change'|'rfi'|'document'|'payment'|'approval'|'sample'})`;
+isSirimRelated (boolean), applicationRef (string), productName (string), modelNumber (string), brand (string), applicant (string), scheme (string), status (string: 'SUBMITTED'|'UNDER_REVIEW'|'SAMPLE_REQUESTED'|'SAMPLE_SUBMITTED'|'TESTING_IN_PROGRESS'|'RFI_ACTION_REQUIRED'|'PAYMENT_PENDING'|'FINAL_EVALUATION'|'APPROVED'|'REJECTED'|'EXPIRED'), statusExplanation (string), officerName (string), officerEmail (string), processingFeeRm (number), detectedStandards (array of strings), courierTracking (string), quotationOrInvoiceNo (string), paymentStatus (string: 'PAID'|'UNPAID'|'NOT_APPLICABLE'), supplierStatus (string), summary (string), timelineEvents (array of {date, title, description, sender, type: 'status_change'|'rfi'|'document'|'payment'|'approval'|'sample'}), actionItems (array of {itemCategory: 'ACTION_REQUIRED'|'PENDING_STATEMENT', title, description, assignedTo: 'APPLICANT'|'SIRIM'|'SUPPLIER'|'LAB', priority: 'CRITICAL'|'HIGH'|'MEDIUM'|'LOW', requiredActionType: 'SUBMIT_DOC'|'PAY_FEE'|'SEND_SAMPLE'|'PROVIDE_CLARIFICATION'|'AWAIT_SIRIM'|'WAITING_SUPPLIER'|'WAITING_LAB'|'WAITING_REPLY'|'RENEW_CERTIFICATE', dueDate, emailSourceSnippet}), resolvedRequirements (array of {title, reason})`;
 
                 const aiPromise = generateContentWithRetryAndFallback(
                   ai,
@@ -3585,8 +3626,11 @@ isSirimRelated (boolean), applicationRef (string), productName (string), modelNu
                   mergedTimeline.sort((a, b) => (a.date < b.date ? -1 : 1));
 
                   // Merge action items without duplicates & evaluate AI progress auto-resolution
-                  const existingActions = existing.actionItems || [];
+                  const existingActions = (existing.actionItems || []).map((a: any) => normalizeActionItem(a));
                   const newStatus = parsed.status || existing.status;
+                  // Status-based auto-resolution must only fire on an actual status CHANGE; otherwise an item
+                  // created while the app was already in that status is wrongly closed on the very next scan.
+                  const statusChanged = newStatus !== existing.status;
                   const mergedActions = existingActions.map((item: any) => {
                     if (item.isCompleted) return item;
 
@@ -3641,8 +3685,9 @@ isSirimRelated (boolean), applicationRef (string), productName (string), modelNu
                     }
 
                     // If payment was pending, but payment is now settled or status progressed
+                    // (Previously ANY status other than PAYMENT_PENDING closed it, so a new RFI silently "paid" the invoice.)
                     if ((type === "PAY_FEE" || titleLower.includes("invoice") || titleLower.includes("payment")) &&
-                        (parsed.paymentStatus === "PAID" || (newStatus !== "PAYMENT_PENDING" && newStatus !== "REJECTED"))) {
+                        (parsed.paymentStatus === "PAID" || (statusChanged && POST_PAYMENT_STATUSES.has(newStatus)))) {
                       return {
                         ...item,
                         isCompleted: true,
@@ -3656,7 +3701,7 @@ isSirimRelated (boolean), applicationRef (string), productName (string), modelNu
 
                     // If waiting for supplier documents, but supplier documents were received or submitted to SIRIM
                     if ((type === "WAITING_SUPPLIER" || item.assignedTo === "SUPPLIER") &&
-                        (parsed.supplierStatus === "DOCUMENTS_RECEIVED_FROM_SUPPLIER" || parsed.supplierStatus === "DOCUMENTS_SUBMITTED_TO_SIRIM" || newStatus === "UNDER_REVIEW")) {
+                        (parsed.supplierStatus === "DOCUMENTS_RECEIVED_FROM_SUPPLIER" || parsed.supplierStatus === "DOCUMENTS_SUBMITTED_TO_SIRIM" || (statusChanged && newStatus === "UNDER_REVIEW"))) {
                       return {
                         ...item,
                         isCompleted: true,
@@ -3668,9 +3713,9 @@ isSirimRelated (boolean), applicationRef (string), productName (string), modelNu
                       };
                     }
 
-                    // If waiting for SIRIM reply, and an officer update / next phase has arrived
-                    if ((type === "AWAIT_SIRIM" || item.assignedTo === "SIRIM") &&
-                        (newStatus === "RFI_ACTION_REQUIRED" || newStatus === "SAMPLE_REQUESTED" || newStatus === "APPROVED")) {
+                    // If waiting for SIRIM / agent reply (incl. general WAITING_REPLY), and an officer update / next phase has arrived
+                    if ((type === "AWAIT_SIRIM" || type === "WAITING_REPLY" || item.assignedTo === "SIRIM") &&
+                        statusChanged && (newStatus === "RFI_ACTION_REQUIRED" || newStatus === "SAMPLE_REQUESTED" || newStatus === "PAYMENT_PENDING" || newStatus === "FINAL_EVALUATION")) {
                       return {
                         ...item,
                         isCompleted: true,
@@ -3682,8 +3727,21 @@ isSirimRelated (boolean), applicationRef (string), productName (string), modelNu
                       };
                     }
 
+                    // If waiting on an external lab, and testing has finished
+                    if ((type === "WAITING_LAB" || item.assignedTo === "LAB") && statusChanged && newStatus === "FINAL_EVALUATION") {
+                      return {
+                        ...item,
+                        isCompleted: true,
+                        completedAt: new Date().toISOString(),
+                        completedBy: "AI Autonomous Engine",
+                        autoResolvedByAi: true,
+                        autoResolvedAt: new Date().toISOString(),
+                        autoResolvedReason: "Auto-resolved: Lab testing completed; application moved to final evaluation.",
+                      };
+                    }
+
                     // If document submission to SIRIM was pending, but application is now UNDER_REVIEW
-                    if ((type === "SUBMIT_DOC" || type === "PROVIDE_CLARIFICATION") && newStatus === "UNDER_REVIEW") {
+                    if ((type === "SUBMIT_DOC" || type === "PROVIDE_CLARIFICATION") && statusChanged && newStatus === "UNDER_REVIEW") {
                       return {
                         ...item,
                         isCompleted: true,
@@ -3701,17 +3759,18 @@ isSirimRelated (boolean), applicationRef (string), productName (string), modelNu
                   if (Array.isArray(parsed.actionItems)) {
                     parsed.actionItems.forEach((act: any, actIdx: number) => {
                       if (!mergedActions.some((a) => a.title.toLowerCase() === act.title.toLowerCase())) {
-                        mergedActions.push({
+                        mergedActions.push(normalizeActionItem({
                           id: `act-auto-${Date.now()}-${actIdx}`,
                           title: act.title,
                           description: act.description || "",
-                          itemCategory: act.itemCategory || (act.assignedTo === "APPLICANT" ? "ACTION_REQUIRED" : "PENDING_STATEMENT"),
+                          itemCategory: act.itemCategory,
                           assignedTo: act.assignedTo || "APPLICANT",
                           dueDate: act.dueDate || new Date(Date.now() + 7 * 86400000).toISOString().split("T")[0],
                           isCompleted: false,
                           priority: act.priority || "HIGH",
                           requiredActionType: act.requiredActionType || "PROVIDE_CLARIFICATION",
-                        });
+                          emailSourceSnippet: act.emailSourceSnippet || undefined,
+                        }));
                       }
                     });
                   }
@@ -3758,11 +3817,11 @@ isSirimRelated (boolean), applicationRef (string), productName (string), modelNu
                     standards: parsed.detectedStandards || [],
                     courierTracking: parsed.courierTracking || undefined,
                     notes: parsed.summary || undefined,
-                    actionItems: (parsed.actionItems || []).map((act: any, i: number) => ({
+                    actionItems: (parsed.actionItems || []).map((act: any, i: number) => normalizeActionItem({
                       id: `act-auto-${Date.now()}-${i}`,
                       title: act.title,
                       description: act.description || "",
-                      itemCategory: act.itemCategory || (act.assignedTo === "APPLICANT" ? "ACTION_REQUIRED" : "PENDING_STATEMENT"),
+                      itemCategory: act.itemCategory,
                       assignedTo: act.assignedTo || "APPLICANT",
                       dueDate: act.dueDate || new Date(Date.now() + 7 * 86400000).toISOString().split("T")[0],
                       isCompleted: false,
