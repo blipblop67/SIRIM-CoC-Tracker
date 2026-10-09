@@ -21,6 +21,7 @@ import {
 import confetti from 'canvas-confetti';
 import {
   SirimApplication,
+  ActionItem,
   SheetSyncConfig,
   UserAuthSession,
   AutomationConfig,
@@ -215,9 +216,44 @@ function sanitizeApplications(apps: SirimApplication[]): SirimApplication[] {
 /**
  * Smart Multi-User local & central server applications merger
  */
-function mergeLocalAndServer(local: SirimApplication[], server: SirimApplication[]): SirimApplication[] {
-  if (!Array.isArray(server) || server.length === 0) return local || [];
-  if (!Array.isArray(local) || local.length === 0) return server || [];
+type DeletedRef = { id?: string; applicationRef?: string; threadId?: string };
+
+function isDeletedLocally(app: SirimApplication, deleted: DeletedRef[]): boolean {
+  const ref = (app.applicationRef || '').trim().toLowerCase();
+  return deleted.some(
+    (d) =>
+      (d.id && d.id === app.id) ||
+      (d.threadId && app.threadId && d.threadId === app.threadId) ||
+      (ref && d.applicationRef && d.applicationRef.trim().toLowerCase() === ref)
+  );
+}
+
+const timeOf = (v?: string) => (v ? new Date(v).getTime() || 0 : 0);
+
+/** Same rule as the server: per action item, the newer `updatedAt` wins. */
+function mergeActionItems(server: ActionItem[] = [], local: ActionItem[] = [], localIsNewer: boolean): ActionItem[] {
+  const merged = [...server];
+  for (const act of local) {
+    const i = merged.findIndex((a) => a.id === act.id || (!!a.title && a.title.toLowerCase() === (act.title || '').toLowerCase()));
+    if (i < 0) {
+      merged.push(act);
+      continue;
+    }
+    const sT = timeOf(merged[i].updatedAt);
+    const lT = timeOf(act.updatedAt);
+    if (sT || lT ? lT > sT : localIsNewer) merged[i] = { ...merged[i], ...act };
+  }
+  return merged;
+}
+
+function mergeLocalAndServer(
+  local: SirimApplication[],
+  server: SirimApplication[],
+  deleted: DeletedRef[] = []
+): SirimApplication[] {
+  local = (local || []).filter((a) => a && !isDeletedLocally(a, deleted));
+  if (!Array.isArray(server) || server.length === 0) return local;
+  if (local.length === 0) return server;
 
   const merged = [...server];
   for (const loc of local) {
@@ -235,11 +271,13 @@ function mergeLocalAndServer(local: SirimApplication[], server: SirimApplication
       merged.push(loc);
     } else {
       const sItem = merged[idx];
-      const sModified = sItem.lastModifiedAt ? new Date(sItem.lastModifiedAt).getTime() : 0;
-      const lModified = loc.lastModifiedAt ? new Date(loc.lastModifiedAt).getTime() : 0;
-      if (lModified >= sModified) {
-        merged[idx] = { ...sItem, ...loc };
-      }
+      const sModified = timeOf(sItem.lastModifiedAt);
+      const lModified = timeOf(loc.lastModifiedAt);
+      const localIsNewer = lModified > sModified;
+      merged[idx] = {
+        ...(localIsNewer ? { ...sItem, ...loc } : sItem),
+        actionItems: mergeActionItems(sItem.actionItems, loc.actionItems, localIsNewer),
+      };
     }
   }
   return merged;
@@ -463,7 +501,7 @@ export default function App() {
         const data = await res.json();
         if (data.success && Array.isArray(data.applications)) {
           setApplications((prevLocal) => {
-            const merged = mergeLocalAndServer(prevLocal, data.applications);
+            const merged = mergeLocalAndServer(prevLocal, data.applications, data.deleted || []);
             const sanitized = sanitizeApplications(merged);
             try {
               localStorage.setItem(APPS_STORAGE_KEY, JSON.stringify(sanitized));
@@ -925,6 +963,7 @@ export default function App() {
               return {
                 ...act,
                 isCompleted: nextState,
+                updatedAt: nowStr,
                 completedAt: nextState ? nowStr : undefined,
                 completedBy: nextState ? authorEmail : undefined,
               };
@@ -956,6 +995,7 @@ export default function App() {
               ? {
                   ...act,
                   isCompleted: !act.isCompleted,
+                  updatedAt: nowStr,
                   completedAt: !act.isCompleted ? nowStr : undefined,
                   completedBy: !act.isCompleted ? authorEmail : undefined,
                 }
@@ -1119,6 +1159,7 @@ export default function App() {
         body: JSON.stringify({
           applications: [],
           merge: false,
+          confirmClearAll: true,
           userEmail: authSession?.email || 'rupa@cytron.io',
         }),
       }).catch(() => {});

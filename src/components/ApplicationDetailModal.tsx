@@ -342,6 +342,7 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({
         return {
           ...a,
           isCompleted: nextState,
+          updatedAt: new Date().toISOString(),
           completedAt: nextState ? new Date().toISOString() : undefined,
           completedBy: nextState ? (currentUserEmail || 'team-member') : undefined,
           autoResolvedByAi: nextState ? a.autoResolvedByAi : false,
@@ -363,7 +364,9 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({
     onUpdateApplication({
       ...application,
       actionItems: application.actionItems.map((a) =>
-        a.id !== actionId ? a : target === 'APPLICANT' ? toActionRequired(a) : toPendingStatement(a, target)
+        a.id !== actionId
+          ? a
+          : { ...(target === 'APPLICANT' ? toActionRequired(a) : toPendingStatement(a, target)), updatedAt: new Date().toISOString() }
       ),
     });
   };
@@ -389,6 +392,7 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({
       requiredActionType: newActionType,
       dueDate: newActionDueDate || undefined,
       isCompleted: false,
+      updatedAt: new Date().toISOString(),
     } as ActionItem);
 
     onUpdateApplication({

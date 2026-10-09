@@ -14,6 +14,14 @@ import {
   GMAIL_OOO_EXCLUSION_QUERY,
 } from "./src/utils/outOfOffice";
 import { normalizeActionItem } from "./src/utils/actionItemUtils";
+import { requireApiAuth, getAccessTokenEmail } from "./server-auth";
+
+// Secrets never leave the server. The UI gets this placeholder instead of the real Telegram bot token
+// and sends it back unchanged when the token was not edited.
+const BOT_TOKEN_MASK = "__saved_on_server__";
+function isMaskedOrEmpty(token?: string | null): boolean {
+  return !token || !String(token).trim() || String(token).trim() === BOT_TOKEN_MASK;
+}
 
 // Shared prompt rules: WHO has the ball decides whether an item is a Cytron action or a waiting statement.
 const ACTION_DIRECTION_RULES = `CRITICAL - WHO HAS THE BALL (DIRECTION OF THE LATEST QUESTION / REQUEST):
@@ -591,6 +599,8 @@ async function startServer() {
   const PORT = Number(process.env.PORT) || 3000;
 
   app.use(express.json({ limit: "15mb" }));
+  // Every /api route (except /api/health) requires a signed-in, allowed Cytron account.
+  app.use(requireApiAuth);
 
   // ----------------------------------------------------
   // Server-side Shared Application & Automation Storage
@@ -607,6 +617,78 @@ async function startServer() {
   const APPS_FILE = path.join(DATA_DIR, "applications-store.json");
   const ACTIVITY_FILE = path.join(DATA_DIR, "team-activity.json");
   const PRESENCE_FILE = path.join(DATA_DIR, "user-presence.json");
+  const DELETED_FILE = path.join(DATA_DIR, "deleted-applications.json");
+  const BACKUP_DIR = path.join(DATA_DIR, "backups");
+  const MAX_BACKUPS = 30;
+
+  /** Write via a temp file + rename so a crash mid-write can't leave a half-written (unreadable) store. */
+  function writeJsonAtomic(file: string, data: any) {
+    const tmp = `${file}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(data, null, 2), "utf8");
+    fs.renameSync(tmp, file);
+  }
+
+  /** Copy the application store to data/backups before anything destructive. Keeps the newest MAX_BACKUPS. */
+  function backupApplicationsStore(reason: string) {
+    try {
+      if (!fs.existsSync(APPS_FILE)) return;
+      if (!fs.existsSync(BACKUP_DIR)) fs.mkdirSync(BACKUP_DIR, { recursive: true });
+      const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+      fs.copyFileSync(APPS_FILE, path.join(BACKUP_DIR, `applications-${stamp}-${reason}.json`));
+      const files = fs.readdirSync(BACKUP_DIR).filter((f) => f.startsWith("applications-")).sort();
+      for (const old of files.slice(0, Math.max(0, files.length - MAX_BACKUPS))) {
+        fs.unlinkSync(path.join(BACKUP_DIR, old));
+      }
+    } catch (err) {
+      console.error("Could not back up applications-store.json:", err);
+    }
+  }
+
+  // Deleted applications are remembered so a teammate's open tab (or the Gmail scanner) can't bring them back.
+  interface DeletedApplication {
+    id?: string;
+    applicationRef?: string;
+    threadId?: string;
+    deletedAt: string;
+    deletedBy?: string;
+  }
+
+  function getDeletedApplications(): DeletedApplication[] {
+    try {
+      if (fs.existsSync(DELETED_FILE)) {
+        const parsed = JSON.parse(fs.readFileSync(DELETED_FILE, "utf8"));
+        if (Array.isArray(parsed)) return parsed;
+      }
+    } catch (err) {
+      console.warn("Could not read deleted-applications.json:", err);
+    }
+    return [];
+  }
+
+  function recordDeletedApplications(apps: any[], deletedBy?: string) {
+    const list = getDeletedApplications();
+    const now = new Date().toISOString();
+    for (const a of apps) {
+      if (!a) continue;
+      list.push({ id: a.id, applicationRef: a.applicationRef, threadId: a.threadId, deletedAt: now, deletedBy });
+    }
+    try {
+      writeJsonAtomic(DELETED_FILE, list.slice(-2000));
+    } catch (err) {
+      console.error("Could not write deleted-applications.json:", err);
+    }
+  }
+
+  function isDeletedApplication(a: any, deleted: DeletedApplication[] = getDeletedApplications()): boolean {
+    if (!a) return false;
+    const ref = (a.applicationRef || "").trim().toLowerCase();
+    return deleted.some(
+      (d) =>
+        (d.id && a.id && d.id === a.id) ||
+        (d.threadId && a.threadId && d.threadId === a.threadId) ||
+        (ref && d.applicationRef && d.applicationRef.trim().toLowerCase() === ref)
+    );
+  }
 
   // Forward declaration for triggering autonomous cycle from any handler
   let triggerAutonomousRunSafely: (source: string, userEmail?: string) => void = () => {};
@@ -661,10 +743,40 @@ async function startServer() {
 
   function saveStoredAutomationConfig(config: any) {
     try {
-      fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2), "utf8");
+      writeJsonAtomic(CONFIG_FILE, config);
     } catch (err) {
       console.error("Could not write automation-config.json:", err);
     }
+  }
+
+  /** Copy of the automation config that is safe to send to a browser (no Gmail or Telegram secrets). */
+  function redactConfig(config: any) {
+    const { activeSession, ...rest } = config || {};
+    const telegram = { ...(rest.telegram || {}) };
+    const hasBotToken = Boolean(telegram.botToken || process.env.TELEGRAM_BOT_TOKEN);
+    telegram.botToken = hasBotToken ? BOT_TOKEN_MASK : "";
+    if (!telegram.chatId && process.env.TELEGRAM_CHAT_ID) telegram.chatId = process.env.TELEGRAM_CHAT_ID;
+    if (!telegram.topicId && process.env.TELEGRAM_TOPIC_ID) telegram.topicId = process.env.TELEGRAM_TOPIC_ID;
+    return {
+      ...rest,
+      telegram,
+      activeSession: activeSession
+        ? {
+            email: activeSession.email,
+            name: activeSession.name,
+            picture: activeSession.picture,
+            expiresAt: activeSession.expiresAt,
+            updatedAt: activeSession.updatedAt,
+            isExpired: Boolean(activeSession.expiresAt && Date.now() > activeSession.expiresAt),
+          }
+        : null,
+    };
+  }
+
+  /** The real Telegram bot token: the one in the request unless it is blank/the mask, else the stored one. */
+  function resolveBotToken(requestToken?: string): string {
+    if (!isMaskedOrEmpty(requestToken)) return String(requestToken).trim();
+    return (getStoredAutomationConfig().telegram?.botToken || process.env.TELEGRAM_BOT_TOKEN || "").trim();
   }
 
   function getStoredApplications(): any[] {
@@ -683,14 +795,16 @@ async function startServer() {
         }
       }
     } catch (err) {
-      console.warn("Could not read applications-store.json:", err);
+      // Refuse to carry on with an empty list: the next save would overwrite (wipe) the real data.
+      console.error("Could not read applications-store.json:", err);
+      throw new Error("Application store could not be read. Restore it from data/backups before continuing.");
     }
     return [];
   }
 
   function saveStoredApplications(apps: any[]) {
     try {
-      fs.writeFileSync(APPS_FILE, JSON.stringify(apps, null, 2), "utf8");
+      writeJsonAtomic(APPS_FILE, apps);
     } catch (err) {
       console.error("Could not write applications-store.json:", err);
     }
@@ -839,160 +953,105 @@ async function startServer() {
    * Prevents overwriting or loss of data when multiple team members (e.g. Lead, Boss)
    * access, scan, or modify records from different browsers or Google inboxes.
    */
+  function toTime(v?: string): number {
+    const t = v ? new Date(v).getTime() : 0;
+    return Number.isFinite(t) ? t : 0;
+  }
+
+  /**
+   * Merges a browser's (or the scanner's) copy of the applications into the shared store.
+   *
+   * Rules:
+   *  - The copy with the newer lastModifiedAt wins for application fields, so an old browser tab can't
+   *    undo a teammate's newer edit.
+   *  - Action items are merged one by one: the newer `updatedAt` wins (falling back to whichever
+   *    application copy is newer). A tick can therefore be removed again; it is no longer "sticky".
+   *  - Email threads and timeline events are only ever added (they come from Gmail).
+   *  - Deleted applications are never brought back.
+   */
   function mergeApplicationsList(baseApps: any[], incomingApps: any[], authorEmail?: string): any[] {
     if (!Array.isArray(baseApps)) baseApps = [];
     if (!Array.isArray(incomingApps)) return baseApps;
 
+    const deleted = getDeletedApplications();
     const cleanBase = baseApps.filter((a) => !isOutOfOfficeApplication(a));
-    const cleanIncoming = incomingApps.filter((a) => !isOutOfOfficeApplication(a));
+    const cleanIncoming = incomingApps.filter((a) => a && !isOutOfOfficeApplication(a) && !isDeletedApplication(a, deleted));
 
     const merged = [...cleanBase];
     const nowStr = new Date().toISOString();
 
     for (const inc of cleanIncoming) {
-      if (!inc) continue;
-      // Match by applicationRef, or id, or threadId
       const idx = merged.findIndex((existing) => {
         if (inc.id && existing.id && inc.id === existing.id) return true;
         if (
           inc.applicationRef &&
           existing.applicationRef &&
-          inc.applicationRef.trim().toLowerCase() === existing.applicationRef.trim().toLowerCase() &&
-          inc.applicationRef.trim() !== ""
+          inc.applicationRef.trim() !== "" &&
+          inc.applicationRef.trim().toLowerCase() === existing.applicationRef.trim().toLowerCase()
         )
           return true;
         if (inc.threadId && existing.threadId && inc.threadId === existing.threadId) return true;
         return false;
       });
 
-      if (idx >= 0) {
-        const existing = merged[idx];
-
-        // Merge email threads
-        const existingThreads = existing.emailThreads || [];
-        const incomingThreads = inc.emailThreads || [];
-        const mergedThreads = [...existingThreads];
-        for (const th of incomingThreads) {
-          if (!mergedThreads.some((m) => m.id === th.id || (m.messageId && m.messageId === th.messageId))) {
-            mergedThreads.push(th);
-          }
-        }
-
-        // Merge timeline
-        const existingTimeline = existing.timeline || [];
-        const incomingTimeline = inc.timeline || [];
-        const mergedTimeline = [...existingTimeline];
-        for (const tl of incomingTimeline) {
-          if (!mergedTimeline.some((t) => t.title === tl.title && t.date === tl.date)) {
-            mergedTimeline.push(tl);
-          }
-        }
-        mergedTimeline.sort((a, b) => (a.date < b.date ? -1 : 1));
-
-        // Merge action items
-        const existingActions = existing.actionItems || [];
-        const incomingActions = inc.actionItems || [];
-        const mergedActions = [...existingActions];
-        for (const act of incomingActions) {
-          const actIdx = mergedActions.findIndex(
-            (a) => (act.id && a.id === act.id) || (act.title && a.title.toLowerCase() === act.title.toLowerCase())
-          );
-          if (actIdx >= 0) {
-            const currentAct = mergedActions[actIdx];
-            const isCompleted = currentAct.isCompleted || act.isCompleted;
-            mergedActions[actIdx] = {
-              ...currentAct,
-              ...act,
-              isCompleted,
-              completedAt: currentAct.completedAt || act.completedAt,
-              completedBy: currentAct.completedBy || act.completedBy,
-              autoResolvedByAi: currentAct.autoResolvedByAi || act.autoResolvedByAi,
-              autoResolvedReason: currentAct.autoResolvedReason || act.autoResolvedReason,
-              autoResolvedAt: currentAct.autoResolvedAt || act.autoResolvedAt,
-            };
-          } else {
-            mergedActions.push(act);
-          }
-        }
-
-        merged[idx] = {
-          ...existing,
-          ...inc,
-          id: existing.id || inc.id,
-          emailThreads: mergedThreads,
-          timeline: mergedTimeline,
-          actionItems: mergedActions,
-          lastModifiedAt: nowStr,
-          lastModifiedBy: authorEmail || inc.lastModifiedBy || existing.lastModifiedBy || "team",
-        };
-      } else {
+      if (idx < 0) {
         merged.push({
           ...inc,
           id: inc.id || `app-${Date.now()}-${Math.random().toString(36).substr(2, 6)}`,
-          lastModifiedAt: nowStr,
-          lastModifiedBy: authorEmail || inc.lastModifiedBy || "team",
+          lastModifiedAt: inc.lastModifiedAt || nowStr,
+          lastModifiedBy: inc.lastModifiedBy || authorEmail || "team",
         });
+        continue;
       }
+
+      const existing = merged[idx];
+      const incomingIsNewer = toTime(inc.lastModifiedAt) > toTime(existing.lastModifiedAt);
+
+      // Email threads & timeline: union
+      const mergedThreads = [...(existing.emailThreads || [])];
+      for (const th of inc.emailThreads || []) {
+        if (!mergedThreads.some((m) => m.id === th.id || (m.messageId && m.messageId === th.messageId))) mergedThreads.push(th);
+      }
+      const mergedTimeline = [...(existing.timeline || [])];
+      for (const tl of inc.timeline || []) {
+        if (!mergedTimeline.some((t) => t.title === tl.title && t.date === tl.date)) mergedTimeline.push(tl);
+      }
+      mergedTimeline.sort((a, b) => (a.date < b.date ? -1 : 1));
+
+      // Action items: per item, newest edit wins
+      const mergedActions = [...(existing.actionItems || [])];
+      for (const act of inc.actionItems || []) {
+        if (!act) continue;
+        const actIdx = mergedActions.findIndex(
+          (a) => (act.id && a.id === act.id) || (act.title && a.title && a.title.toLowerCase() === act.title.toLowerCase())
+        );
+        if (actIdx < 0) {
+          mergedActions.push(act);
+          continue;
+        }
+        const cur = mergedActions[actIdx];
+        const curT = toTime(cur.updatedAt);
+        const actT = toTime(act.updatedAt);
+        const takeIncoming = curT || actT ? actT > curT : incomingIsNewer;
+        if (takeIncoming) mergedActions[actIdx] = { ...cur, ...act, id: cur.id || act.id };
+      }
+
+      const base = incomingIsNewer ? { ...existing, ...inc } : existing;
+      merged[idx] = {
+        ...base,
+        id: existing.id || inc.id,
+        emailThreads: mergedThreads,
+        timeline: mergedTimeline,
+        actionItems: mergedActions,
+        lastModifiedAt: incomingIsNewer ? inc.lastModifiedAt : existing.lastModifiedAt || nowStr,
+        lastModifiedBy: incomingIsNewer
+          ? inc.lastModifiedBy || authorEmail || existing.lastModifiedBy || "team"
+          : existing.lastModifiedBy || "team",
+      };
     }
 
     return merged;
   }
-
-  // ----------------------------------------------------
-  // Central Multi-User Applications Store Endpoints
-  // ----------------------------------------------------
-  app.get("/api/applications", (req: Request, res: Response) => {
-    try {
-      const apps = getStoredApplications();
-      res.json({
-        success: true,
-        count: apps.length,
-        applications: apps,
-        lastUpdated: fs.existsSync(APPS_FILE) ? fs.statSync(APPS_FILE).mtime.toISOString() : null,
-      });
-    } catch (e: any) {
-      res.status(500).json({ error: "Failed to load stored applications", details: e?.message });
-    }
-  });
-
-  app.post("/api/applications/save", (req: Request, res: Response) => {
-    try {
-      const { applications = [], userEmail, merge = true } = req.body;
-      if (!Array.isArray(applications)) {
-        return res.status(400).json({ error: "applications must be an array" });
-      }
-
-      let finalApps: any[];
-      if (merge) {
-        const existing = getStoredApplications();
-        finalApps = mergeApplicationsList(existing, applications, userEmail);
-      } else {
-        finalApps = applications;
-      }
-
-      saveStoredApplications(finalApps);
-      res.json({
-        success: true,
-        count: finalApps.length,
-        applications: finalApps,
-        savedAt: new Date().toISOString(),
-      });
-    } catch (e: any) {
-      res.status(500).json({ error: "Failed to save applications", details: e?.message });
-    }
-  });
-
-  app.delete("/api/applications/:id", (req: Request, res: Response) => {
-    try {
-      const { id } = req.params;
-      const existing = getStoredApplications();
-      const updated = existing.filter((a: any) => a.id !== id && a.applicationRef !== id);
-      saveStoredApplications(updated);
-      res.json({ success: true, count: updated.length, applications: updated });
-    } catch (e: any) {
-      res.status(500).json({ error: "Failed to delete application", details: e?.message });
-    }
-  });
 
   // ----------------------------------------------------
   // Health Check
@@ -2628,37 +2687,26 @@ Evaluate thoroughly and return a JSON matching the schema.`;
   // Automation Config Endpoints (Persistent Server Storage)
   // ----------------------------------------------------
   app.get("/api/automation/config", (req: Request, res: Response) => {
-    const config = getStoredAutomationConfig();
-    // Fill in environment variable fallbacks if config is missing values
-    if (!config.telegram) {
-      config.telegram = {};
-    }
-    if (!config.telegram.botToken && process.env.TELEGRAM_BOT_TOKEN) {
-      config.telegram.botToken = process.env.TELEGRAM_BOT_TOKEN;
-    }
-    if (!config.telegram.chatId && process.env.TELEGRAM_CHAT_ID) {
-      config.telegram.chatId = process.env.TELEGRAM_CHAT_ID;
-    }
-    if (!config.telegram.topicId && process.env.TELEGRAM_TOPIC_ID) {
-      config.telegram.topicId = process.env.TELEGRAM_TOPIC_ID;
-    }
-    res.json(config);
+    res.json(redactConfig(getStoredAutomationConfig()));
   });
 
   app.post("/api/automation/config", (req: Request, res: Response) => {
     try {
-      const incoming = req.body;
+      // The Gmail session can only be set through /api/automation/session; logs are server-owned.
+      const { activeSession: _ignoredSession, logs: _ignoredLogs, ...incoming } = req.body || {};
       const current = getStoredAutomationConfig();
+      const incomingTelegram = { ...(incoming.telegram || {}) };
+      if (isMaskedOrEmpty(incomingTelegram.botToken)) delete incomingTelegram.botToken; // keep the saved token
       const updated = {
         ...current,
         ...incoming,
         telegram: {
           ...(current.telegram || {}),
-          ...(incoming.telegram || {}),
+          ...incomingTelegram,
         },
       };
       saveStoredAutomationConfig(updated);
-      res.json({ success: true, config: updated });
+      res.json({ success: true, config: redactConfig(updated) });
     } catch (err: any) {
       res.status(500).json({ error: "Failed to save configuration", details: err?.message });
     }
@@ -2669,15 +2717,21 @@ Evaluate thoroughly and return a JSON matching the schema.`;
   // ----------------------------------------------------
   app.post("/api/automation/session", async (req: Request, res: Response) => {
     try {
-      const { accessToken, email, name, picture, expiresAt } = req.body;
+      const { accessToken, name, picture, expiresAt } = req.body;
       if (!accessToken) {
         return res.status(400).json({ error: "accessToken is required" });
       }
+      // Only accept a Gmail token that belongs to the person who is signed in.
+      const tokenEmail = await getAccessTokenEmail(accessToken);
+      if (!tokenEmail || tokenEmail !== req.user?.email) {
+        return res.status(403).json({ error: "This Google token does not belong to your signed-in account." });
+      }
+      const email = tokenEmail;
 
       const config = getStoredAutomationConfig();
       config.activeSession = {
         accessToken,
-        email: email || "team-member@cytron.io",
+        email,
         name: name || "",
         picture: picture || "",
         expiresAt: expiresAt || Date.now() + 3600 * 1000,
@@ -2699,7 +2753,7 @@ Evaluate thoroughly and return a JSON matching the schema.`;
         success: true,
         message: "Google account authorized for autonomous agent.",
         triggeredAutonomousRun,
-        config,
+        config: redactConfig(config),
       });
     } catch (err: any) {
       res.status(500).json({ error: "Failed to register session", details: err?.message });
@@ -2737,7 +2791,7 @@ Evaluate thoroughly and return a JSON matching the schema.`;
         success: true,
         message: "Google Sheet linked for autonomous agent.",
         triggeredAutonomousRun,
-        config,
+        config: redactConfig(config),
       });
     } catch (err: any) {
       res.status(500).json({ error: "Failed to register sheet config", details: err?.message });
@@ -2766,7 +2820,14 @@ Evaluate thoroughly and return a JSON matching the schema.`;
   app.get("/api/applications", (req: Request, res: Response) => {
     try {
       const apps = getStoredApplications();
-      res.json({ success: true, applications: apps, count: apps.length });
+      res.json({
+        success: true,
+        applications: apps,
+        count: apps.length,
+        // Lets browsers drop apps a teammate deleted instead of re-uploading them.
+        deleted: getDeletedApplications().map((d) => ({ id: d.id, applicationRef: d.applicationRef, threadId: d.threadId })),
+        lastUpdated: fs.existsSync(APPS_FILE) ? fs.statSync(APPS_FILE).mtime.toISOString() : null,
+      });
     } catch (err: any) {
       res.status(500).json({ error: "Failed to retrieve applications", details: err?.message });
     }
@@ -2774,19 +2835,27 @@ Evaluate thoroughly and return a JSON matching the schema.`;
 
   app.post("/api/applications/save", (req: Request, res: Response) => {
     try {
-      const { applications, userEmail, merge = true, activitySummary } = req.body;
+      const { applications, merge = true, activitySummary, confirmClearAll } = req.body;
+      const userEmail = req.user?.email || req.body.userEmail;
       if (!Array.isArray(applications)) {
         return res.status(400).json({ error: "Invalid applications array" });
       }
 
       let finalApps: any[] = [];
       if (merge === false) {
-        // Complete replacement (e.g. user confirmed clearing all applications)
+        // Full replacement is only used by "clear all"; require an explicit flag and keep a backup.
+        if (confirmClearAll !== true) {
+          return res.status(400).json({ error: "Replacing the whole store requires confirmClearAll: true" });
+        }
+        const current = getStoredApplications();
+        backupApplicationsStore("clear-all");
+        const keptIds = new Set(applications.map((a: any) => a?.id).filter(Boolean));
+        recordDeletedApplications(current.filter((a: any) => !keptIds.has(a.id)), userEmail);
         finalApps = applications;
         recordTeamActivity({
           userEmail,
           actionType: "APP_DELETED",
-          description: `${userEmail || "A team member"} cleared all applications from the shared database.`,
+          description: `${userEmail || "A team member"} cleared all applications from the shared database (backup saved in data/backups).`,
         });
       } else {
         const current = getStoredApplications();
@@ -2803,7 +2872,13 @@ Evaluate thoroughly and return a JSON matching the schema.`;
       }
 
       saveStoredApplications(finalApps);
-      res.json({ success: true, count: finalApps.length, applications: finalApps });
+      res.json({
+        success: true,
+        count: finalApps.length,
+        applications: finalApps,
+        deleted: getDeletedApplications().map((d) => ({ id: d.id, applicationRef: d.applicationRef, threadId: d.threadId })),
+        savedAt: new Date().toISOString(),
+      });
     } catch (err: any) {
       res.status(500).json({ error: "Failed to save applications", details: err?.message });
     }
@@ -2812,13 +2887,18 @@ Evaluate thoroughly and return a JSON matching the schema.`;
   app.delete("/api/applications/:id", (req: Request, res: Response) => {
     try {
       const targetId = req.params.id;
-      const userEmail = (req.query.userEmail as string) || "team-member";
+      const userEmail = req.user?.email || "team-member";
       const current = getStoredApplications();
-      const targetApp = current.find((a: any) => a.id === targetId);
-      const filtered = current.filter((a: any) => a.id !== targetId);
+      const targets = current.filter((a: any) => a.id === targetId || a.applicationRef === targetId);
+      if (targets.length === 0) {
+        return res.json({ success: true, count: current.length });
+      }
+      backupApplicationsStore("delete");
+      recordDeletedApplications(targets, userEmail);
+      const filtered = current.filter((a: any) => !targets.includes(a));
       saveStoredApplications(filtered);
 
-      if (targetApp) {
+      for (const targetApp of targets) {
         recordTeamActivity({
           userEmail,
           actionType: "APP_DELETED",
@@ -3019,6 +3099,7 @@ Return a JSON object with:
             autoResolvedByAi: true,
             autoResolvedAt: new Date().toISOString(),
             autoResolvedReason: evalItem.reason || "Auto-resolved by AI based on email progress verification.",
+            updatedAt: new Date().toISOString(),
           };
         }
         return item;
@@ -3027,6 +3108,7 @@ Return a JSON object with:
       targetApp = {
         ...targetApp,
         actionItems: updatedActionItems,
+        ...(resolvedCount > 0 ? { lastModifiedAt: new Date().toISOString(), lastModifiedBy: "AI Autonomous Engine" } : {}),
       };
 
       if (targetIdx >= 0) {
@@ -3145,7 +3227,7 @@ Return a JSON object with:
   app.post("/api/telegram/test", async (req: Request, res: Response) => {
     try {
       const { botToken, chatId, topicId } = req.body;
-      const token = (botToken || process.env.TELEGRAM_BOT_TOKEN || "").trim();
+      const token = resolveBotToken(botToken);
       const chat = (chatId || process.env.TELEGRAM_CHAT_ID || "").trim();
 
       const testMessage = `✅ <b>SIRIM CoC Tracker — Telegram Connection Verified!</b>\n\n` +
@@ -3173,7 +3255,7 @@ Return a JSON object with:
   app.post("/api/telegram/send", async (req: Request, res: Response) => {
     try {
       const { botToken, chatId, topicId, message, applications, sheetUrl, title, isUrgentAlert } = req.body;
-      const token = (botToken || process.env.TELEGRAM_BOT_TOKEN || "").trim();
+      const token = resolveBotToken(botToken);
       const chat = (chatId || process.env.TELEGRAM_CHAT_ID || "").trim();
 
       let textToSend = message;
@@ -3206,7 +3288,7 @@ Return a JSON object with:
   app.post("/api/telegram/alert", async (req: Request, res: Response) => {
     try {
       const { botToken, chatId, topicId, application, message } = req.body;
-      const tgBotToken = (botToken || process.env.TELEGRAM_BOT_TOKEN || "").trim();
+      const tgBotToken = resolveBotToken(botToken);
       const tgChatId = (chatId || process.env.TELEGRAM_CHAT_ID || "").trim();
 
       if (!tgBotToken || !tgChatId) {
@@ -3296,7 +3378,10 @@ Return a JSON object with:
         options = {},
       } = params;
 
-      const accessToken = params.accessToken || storedConfig.activeSession?.accessToken || null;
+      // The stored Google token lasts ~1 hour (no refresh token). Don't use it once expired.
+      const storedSession = storedConfig.activeSession;
+      const storedTokenValid = Boolean(storedSession?.accessToken && (!storedSession.expiresAt || Date.now() < storedSession.expiresAt));
+      const accessToken = params.accessToken || (storedTokenValid ? storedSession.accessToken : null);
       const userEmail = params.userEmail || storedConfig.activeSession?.email || "autonomous-agent@cytron.io";
 
       const sheetConfig = directSheetConfig || (spreadsheetId ? {
@@ -3438,6 +3523,11 @@ Return a JSON object with:
                 (a) => a.threadId === thread.id || (a.applicationRef && subject.toLowerCase().includes(a.applicationRef.toLowerCase()))
               );
               const existingApp = existingIdx >= 0 ? currentApplications[existingIdx] : null;
+
+              // Don't re-create an application the team deleted.
+              if (!existingApp && isDeletedApplication({ threadId: thread.id })) {
+                continue;
+              }
 
               // If existing application already has all messages from this thread, skip heavy AI re-parsing
               const existingMsgCount = existingApp?.emailThreads?.length || 0;
@@ -3755,6 +3845,11 @@ isSirimRelated (boolean), applicationRef (string), productName (string), modelNu
 
                     return item;
                   });
+                  // Stamp anything the scanner changed so browsers don't overwrite it with an older copy.
+                  const scanTime = new Date().toISOString();
+                  mergedActions.forEach((m: any, i: number) => {
+                    if (m !== existingActions[i]) m.updatedAt = scanTime;
+                  });
 
                   if (Array.isArray(parsed.actionItems)) {
                     parsed.actionItems.forEach((act: any, actIdx: number) => {
@@ -3777,6 +3872,8 @@ isSirimRelated (boolean), applicationRef (string), productName (string), modelNu
 
                   currentApplications[existingIdx] = {
                     ...existing,
+                    lastModifiedAt: new Date().toISOString(),
+                    lastModifiedBy: "AI Autonomous Engine",
                     status: parsed.status || existing.status,
                     officerName: parsed.officerName || existing.officerName,
                     officerEmail: parsed.officerEmail || existing.officerEmail,
@@ -3848,7 +3945,13 @@ isSirimRelated (boolean), applicationRef (string), productName (string), modelNu
           addLog("SCAN", "WARNING", `Gmail auto-scan skipped or failed: ${scanErr?.message || scanErr}`);
         }
       } else {
-        addLog("SCAN", "INFO", "Gmail scan bypassed (no active OAuth session or disabled).");
+        addLog(
+          "SCAN",
+          autoScanGmail && !accessToken ? "WARNING" : "INFO",
+          autoScanGmail && !accessToken
+            ? "Gmail scan skipped: the saved Google sign-in has expired (Google tokens last about 1 hour). Open the tracker and sign in to refresh it."
+            : "Gmail scan disabled in automation settings."
+        );
       }
 
       // STEP 2: Auto-Sync Google Sheet
@@ -3950,7 +4053,7 @@ isSirimRelated (boolean), applicationRef (string), productName (string), modelNu
 
       // STEP 3: Dispatch Telegram Digest / Notification (STRICT SPAM PREVENTION)
       let telegramSent = false;
-      const tgBotToken = telegramConfig?.botToken || process.env.TELEGRAM_BOT_TOKEN;
+      const tgBotToken = resolveBotToken(telegramConfig?.botToken) || undefined;
       const tgChatId = telegramConfig?.chatId || process.env.TELEGRAM_CHAT_ID;
 
       // Rate limit check: Strict cooldown enforcement
@@ -4115,6 +4218,7 @@ isSirimRelated (boolean), applicationRef (string), productName (string), modelNu
 
       const result = await runAutonomousPipelineCore({
         ...req.body,
+        userEmail: req.user?.email || req.body.userEmail,
         accessToken: accessToken || req.body.accessToken,
         triggerSource,
         autoSendTelegram,
@@ -4145,7 +4249,7 @@ isSirimRelated (boolean), applicationRef (string), productName (string), modelNu
       res.json({
         success: true,
         message: "First-scan flag reset. Next automated or manual scan will scan 1 whole year (365 days) of email archives.",
-        config,
+        config: redactConfig(config),
       });
     } catch (e: any) {
       res.status(500).json({ error: "Failed to reset first scan flag", details: e?.message });

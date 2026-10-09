@@ -9,5 +9,6 @@ coverage/
 
 # Runtime local data & active session tokens (prevents GH007 secret scanning blocks)
 data/*.json
+data/backups/
 !data/*.example.json
 !data/.gitkeep

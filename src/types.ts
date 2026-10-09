@@ -53,6 +53,7 @@ export interface ActionItem {
   autoResolvedReason?: string;
   autoResolvedAt?: string;
   emailSourceSnippet?: string;
+  updatedAt?: string; // last time anyone (person or AI) changed this item; newest wins when merging
 }
 
 export interface TimelineEvent {

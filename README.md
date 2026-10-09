@@ -122,7 +122,13 @@ PORT=3000
 TELEGRAM_BOT_TOKEN="1234567890:ABCdef..."
 TELEGRAM_CHAT_ID="-1001234567890"
 TELEGRAM_TOPIC_ID=""
+
+# Who may sign in (everyone else gets "not allowed"). Default: cytron.io
+ALLOWED_EMAIL_DOMAINS="cytron.io"
+# Optional extra individual accounts, comma-separated
+ALLOWED_EMAILS=""
 ```
+Every `/api` request now needs a signed-in Google account from an allowed domain, so the tracker is safe to expose beyond the office LAN.
 *(Press `Ctrl + O` then `Enter` to save, and `Ctrl + X` to exit nano)*.
 
 ---
@@ -246,8 +252,11 @@ All records, active applications, team activity logs, and automation configs are
   ├── applications-store.json   # All SIRIM applications and history
   ├── automation-config.json    # Morning digest schedule & Telegram settings
   ├── team-activity.json        # Live team audit trail
-  └── user-presence.json        # Active online team members
+  ├── user-presence.json        # Active online team members
+  ├── deleted-applications.json # Deleted apps, so open tabs / the scanner can't bring them back
+  └── backups/                  # Automatic copy of applications-store.json before every delete or "clear all" (last 30 kept)
 ```
+To restore after an accidental delete, stop the server, copy the wanted file from `data/backups/` over `data/applications-store.json`, remove the matching entries from `data/deleted-applications.json`, and start the server again.
 To back up your data:
 ```bash
 tar -czvf sirim-data-backup-$(date +%F).tar.gz data/
